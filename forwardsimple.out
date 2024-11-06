@@ -1,0 +1,15 @@
+
+Attaching package: ‘dplyr’
+
+The following objects are masked from ‘package:stats’:
+
+    filter, lag
+
+The following objects are masked from ‘package:base’:
+
+    intersect, setdiff, setequal, union
+
+       mean median        sd        var min max
+1 0.0255651      0 0.2332836 0.05442126   0  39
+Saving 7 x 7 in image
+[1] TRUE
