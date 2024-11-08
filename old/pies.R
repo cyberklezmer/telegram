@@ -14,7 +14,7 @@ con <- dbConnect(
   host = "bethel.utia.cas.cz",
   user = "jak",
   password = "jaknajaka",
-  dbname = "telegram"
+  dbname = "telegram_czech"
 )
 
 catalogue_data <- dbGetQuery(con, "SELECT * FROM catalogue")

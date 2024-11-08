@@ -1,0 +1,114 @@
+# Load necessary packages
+library(DBI)
+library(RMySQL)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(tidyr)
+library(tibble)
+library(xtable)
+
+output_folder <- "out/"
+
+# Connect to MySQL database
+con <- dbConnect(
+  MySQL(),
+  host = "bethel.utia.cas.cz",
+  user = "jak",
+  password = "jaknajaka",
+  dbname = "telegram_czech"
+)
+
+catalogue_data <- dbGetQuery(con, "SELECT * FROM catalogue")
+
+# Shrnutí dat podle 'lang_messeges' pro 'sum_members'
+catalogue_summary_members <- catalogue_data %>%
+  group_by(lang_messeges) %>%
+  summarise(
+    num_rows = n(),
+    sum_members = sum(members, na.rm = TRUE)
+  ) %>%
+  arrange(desc(sum_members))
+
+# Uspořádání na top 10 hodnot a zbytek jako "Other" pro 'sum_members'
+
+# Reorder lang_messeges factor based on sum_members
+catalogue_summary_members$lang_messeges <- factor(catalogue_summary_members$lang_messeges, levels = catalogue_summary_members$lang_messeges[order(-catalogue_summary_members$sum_members)])
+
+# Abbreviate lang_messeges to three letters
+catalogue_summary_members$lang_messeges_abbr <- substr(as.character(catalogue_summary_members$lang_messeges), 1, 3)
+
+# Uložení summary do CSV pro 'sum_members'
+write.csv(catalogue_summary_members,paste0(output_folder, "catalogue_summary_members.csv"), row.names = FALSE)
+
+# Vykreslení koláčového grafu pro 'sum_members'
+plot_sum_members <- ggplot(catalogue_summary_members, aes(x = "", y = sum_members, fill = lang_messeges_abbr)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  labs(
+    title = "Sum of Members by Lang_messeges (Catalogue Data)",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(), panel.grid = element_blank()) +
+  geom_text(aes(label = paste0(lang_messeges_abbr, ": ", scales::number(sum_members, accuracy = 1))),
+            position = position_stack(vjust = 0.5), check_overlap = TRUE)
+
+# Uložení grafu 'sum_members'
+ggsave(paste0(output_folder, "catalogue_summary_members_pie_chart.png"), plot = plot_sum_members, width = 10, height = 6)
+
+
+# Analýza tabulky 'catalogue' s INNER JOIN
+catalogue_joined_data <- dbGetQuery(con, "
+  SELECT c.*, IFNULL(m.message_count, 0) AS message_count
+FROM catalogue c
+INNER JOIN channels ch ON c.account = ch.username
+LEFT JOIN ( 
+    SELECT channel_id, COUNT(*) AS message_count
+    FROM messages
+    GROUP BY channel_id
+) m ON ch.id = m.channel_id;
+")
+
+# Shrnutí dat podle 'lang_messeges'
+catalogue_joined_summary <- catalogue_joined_data %>%
+  group_by(lang_messeges) %>%
+  summarise(
+    num_rows = n(),
+    sum_members = sum(members, na.rm = TRUE)
+  ) %>%
+  arrange(desc(sum_members))
+
+# Reorder lang_messeges factor based on sum_members
+catalogue_joined_summary$lang_messeges <- factor(catalogue_joined_summary$lang_messeges, levels = catalogue_joined_summary$lang_messeges[order(-catalogue_joined_summary$sum_members)])
+
+# Abbreviate lang_messeges to three letters
+catalogue_joined_summary$lang_messeges_abbr <- substr(as.character(catalogue_joined_summary$lang_messeges), 1, 3)
+
+# Uložení summary do CSV
+write.csv(catalogue_joined_summary, paste0(output_folder, "catalogue_joined_summary.csv"), row.names = FALSE)
+
+# Vykreslení koláčového grafu pro sum_members
+plot_sum_members_joined <- ggplot(catalogue_joined_summary, aes(x = "", y = sum_members, fill = lang_messeges_abbr)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  labs(
+    title = "Sum of Members by Lang_messeges (Joined Data)",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(), panel.grid = element_blank()) +
+  geom_text(aes(label = paste0(lang_messeges_abbr, ": ", scales::number(sum_members, accuracy = 1))),
+            position = position_stack(vjust = 0.5), check_overlap = TRUE)
+
+# Uložení grafu sum_members
+ggsave(paste0(output_folder, "catalogue_joined_summary_sum_members_pie_chart.png"),
+       plot = plot_sum_members_joined, width = 10, height = 6)
+
+
+# Combine the summary tables
+
+# Disconnect from the database
+dbDisconnect(con)

@@ -14,10 +14,10 @@ con <- dbConnect(
   host = "bethel.utia.cas.cz",
   user = "jak",
   password = "jaknajaka",
-  dbname = "telegram"
+  dbname = "telegram_czech"
 )
 
-
+print("Logged in")
 
 
 # Retrieve data from the database
