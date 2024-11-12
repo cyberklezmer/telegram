@@ -60,9 +60,9 @@ type_summary <- catalogue_data %>%
    write.csv(type_summary, output_file_csv, row.names = FALSE)
 
 
-for(i in (1:2)) 
+for(i in (0:3)) 
 {
-  ns <- if_else(i==0,"OTHER",if_else(i==1, "CZECH","SLOVAK"))
+  ns <- if_else(i==0,"OTHER",if_else(i==1, "CZECH",if_else(i==2,"SLOVAK","CS")))
   
   if(i==0)
   {
@@ -71,13 +71,21 @@ for(i in (1:2))
   }
   else
   {
-     c_data <- catalogue_data  %>%
-       filter(lang == ns)
+    if(i==3)
+    {
+      c_data <- catalogue_data %>%
+        filter(lang == "CZECH" | lang == "SLOVAK")
+    }
+    else
+    {
+      c_data <- catalogue_data  %>%
+        filter(lang == ns)
+    }
   }
 
   top_channels <- c_data %>%
     arrange(desc(reach_own)) %>%
-    head(20)
+    head(if_else(i==3,30,20))
   
   
   
