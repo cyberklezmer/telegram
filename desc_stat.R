@@ -24,7 +24,7 @@ con <- dbConnect(
 
 # Query the database for relevant data
 catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
-             msg_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (source = 'slerka')")
+             msg_count, reaction_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (source = 'slerka')")
 
  
 # Clean and convert subscribers column
@@ -142,7 +142,8 @@ for(i in (0:3))
   top_channels <- top_channels %>%
     mutate(
       accepted = forwarded_to / msg_count,
-      sent = forwarded_from / msg_count
+      sent = forwarded_from / msg_count,
+      reacted = reaction_count / msg_count
     )
 
     # Save to CSV file
