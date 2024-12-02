@@ -60,7 +60,7 @@ type_summary <- catalogue_data %>%
    write.csv(type_summary, output_file_csv, row.names = FALSE)
 
 
-for(i in (0:3)) 
+for(i in (3:3)) 
 {
   ns <- if_else(i==0,"OTHER",if_else(i==1, "CZECH",if_else(i==2,"SLOVAK","CS")))
   
@@ -96,28 +96,41 @@ for(i in (0:3))
     filter(channel_id %in% top_channel_ids & src_channel_id %in% top_channel_ids) %>%
     count(src_channel_id, channel_id) %>%
     complete(src_channel_id = top_channel_ids, channel_id = top_channel_ids, fill = list(n = 0))
+ 
+  # Replace channel_id in interaction_data with corresponding username
+  interaction_data <- interaction_data %>%
+    left_join(select(top_channels, channel_id, username), 
+              by = c("src_channel_id" = "channel_id")) %>%
+    rename(src_username = username) %>%
+    left_join(select(top_channels, channel_id, username,msg_count), 
+              by = c("channel_id" = "channel_id")) %>%
+    rename(dest_username = username,
+           dest_msg_count = msg_count) %>%
+    select(src_username, dest_username, n, dest_msg_count)  # Keep only relevant columns
+  
   
   interaction_data <- interaction_data %>%
     mutate(n = if_else(n<5,0,n))
   
+  interaction_data <- interaction_data %>%
+    mutate(percent_received = n/dest_msg_count)
+  
   # Step 2: Create the adjacency matrix from the completed interaction data
   interaction_matrix <- interaction_data %>%
-    pivot_wider(names_from = channel_id, values_from = n, values_fill = 0)
-  
-  # Ensure row names are set and convert to matrix
-  rownames(interaction_matrix) <- interaction_matrix$src_channel_id
-  interaction_matrix <- interaction_matrix %>%
-    select(-src_channel_id) %>%
+    pivot_wider(names_from = dest_username, values_from = n, values_fill = 0) %>%
+    column_to_rownames(var = "src_username") %>%
     as.matrix()
   
+  # Ensure row names are set and convert to matrix
+
+  
+  output_file_matrix_csv <- file.path(output_folder, paste0( ns,"_interaction_matrix", ".csv"))
+  write.csv(interaction_matrix, output_file_matrix_csv, row.names = TRUE)
+  
+
   # Step 3: Convert the matrix into an igraph object
   interaction_graph <- graph_from_adjacency_matrix(interaction_matrix, mode = "directed", weighted = TRUE)
   
-  
-  
-  # Add vertex names (IDs) to the igraph object
-  V(interaction_graph)$name <- str_trunc(top_channels$username, 20)
-
   interaction_graph <- delete_vertices(interaction_graph, which(degree(interaction_graph) == 0))
   
   # Print debugging info
@@ -138,7 +151,46 @@ for(i in (0:3))
   
   output_path <- file.path(output_folder, paste0(ns,"_interaction_graph.png"))
   ggsave(output_path, plot = plot, width = 10, height = 8, dpi = 300)
+
   
+  # relative graph
+  interaction_matrix_rel <- interaction_data %>%
+    pivot_wider(names_from = dest_username, values_from = percent_received, values_fill = 0) %>%
+    column_to_rownames(var = "src_username") %>%
+    as.matrix()
+  
+  # Ensure row names are set and convert to matrix
+  
+  
+  output_file_matrix_rel_csv <- file.path(output_folder, paste0( ns,"_interaction_matrix_rel", ".csv"))
+  write.csv(interaction_matrix_rel, output_file_matrix_rel_csv, row.names = TRUE)
+  
+  
+  # Step 3: Convert the matrix into an igraph object
+  interaction_graph_rel <- graph_from_adjacency_matrix(interaction_matrix_rel, mode = "directed", weighted = TRUE)
+  
+  interaction_graph_rel <- delete_vertices(interaction_graph_rel, which(degree(interaction_graph_rel) == 0))
+  
+  # Print debugging info
+  cat("Number of vertices:", vcount(interaction_graph_rel), "\n")
+  cat("Number of edges:", ecount(interaction_graph_rel), "\n")
+  
+  # Check if there are any edges with weights greater than 0
+  print(E(interaction_graph_rel)$weight)
+  
+  # Step 4: Simplify the plot and adjust width scaling
+  plot_rel <- ggraph(interaction_graph_rel, layout = "fr") +
+    geom_edge_link(aes(edge_alpha = weight, edge_width = weight), 
+                   arrow = arrow(length = unit(3, 'mm')), # Define arrow size for visibility
+                   end_cap = circle(3, 'mm')) + # Adjust end cap for clarity
+    geom_node_point(size = 5) +
+    geom_node_text(aes(label = name), repel = TRUE, size = 6) + # Increase label size to 6
+    theme_void()  # Step 5: Save the plot as PNG
+  
+  output_path_rel <- file.path(output_folder, paste0(ns,"_interaction_graph_rel.png"))
+  ggsave(output_path_rel, plot = plot_rel, width = 10, height = 8, dpi = 300)
+  
+    
   top_channels <- top_channels %>%
     mutate(
       accepted = forwarded_to / msg_count,

@@ -19,7 +19,7 @@ library(grid)
 library(kableExtra)
 library(knitr)
 
-chnumber <- 2
+chnumber <- 100
 
 
 list_messages <- function(username, column, desc) {
@@ -31,7 +31,7 @@ list_messages <- function(username, column, desc) {
   {
     idstr <- paste0(column,"_desc")
     top_messages <- message_totals %>%
-      arrange(desc(!!col)) %>% # Sort by total_reactions_count in descending order
+      arrange(desc(!!col), desc(total_reactions_count)) %>% # Sort by total_reactions_count in descending order
       slice(1:10)                             # Select the top 10 messages
   }
   else
@@ -49,14 +49,15 @@ list_messages <- function(username, column, desc) {
         "<script async src=\"https://telegram.org/js/telegram-widget.js?22\" data-telegram-post=\"",
         username, "/", message_id, "\" data-width=\"100%\"></script> "
       ),
-      message_link = sprintf("<a href='%s' target='_blank'>%s</a>", message_url, message_url),
-      reaction_per_subscriber = round(total_reactions_count / nsubscribers, 2),
-      ppos = round(total_positive / reactions_with_sentiment, 2),
-      pneg = round(total_negative / reactions_with_sentiment, 2),
+      message_link = sprintf("<a href='%s' target='_blank'>link</a>", message_url),
+      reaction_per_subscriber = round(total_reactions_count / nsubscribers, 3),
+      ppos = round(total_positive / reactions_with_sentiment, 4),
+      pneg = round(total_negative / reactions_with_sentiment, 4),
       info_code = paste0(
-        "RPS ", reaction_per_subscriber,
-        "<br>Pos ", round(positiveness, 2),
-        "<br>Pol ", round(polarization, 2),
+        "URL ", message_link,
+        "<br>RPS ", reaction_per_subscriber,
+        "<br>Pos ", round(positiveness, 3),
+        "<br>Pol ", round(polarization, 3),
         "<br>Ppos ", ppos,
         "<br>Pneg ", pneg
       )
@@ -78,12 +79,22 @@ list_messages <- function(username, column, desc) {
     column_spec(2, extra_css = "vertical-align: top;") %>%    # Align Message column to the top
     column_spec(3, extra_css = "vertical-align: top;")    
   
+  pagetitle <- paste0(username, " by ", idstr)
+  
   # Step 2: Add the concatenated URL column
   # Assuming 'username' and 'message_id' are columns in the original dataset or grouped_data
+  html_content <- paste0(
+    "<!DOCTYPE html><html><head><title>", pagetitle, "</title></head><body>",
+    "<h1>", pagetitle, "</h1>",
+    as.character(html_table),
+    "</body></html>"
+  )
   
+  # Write HTML to file
+  output_file <- file.path(output_folder, paste0(username, "_msgs_by_", idstr, ".html"))
+  writeLines(html_content, output_file)  
   
-  # Step 4: Write HTML to file
-  writeLines(as.character(html_table), paste0(output_folder,username,"msgs_by_",idstr,".html") )  
+
 }
 
 hex_to_text <- function(hex_strings) {
@@ -141,7 +152,7 @@ emoticons =  dbGetQuery(con, "SELECT *, HEX(emoticon) as hex_emo, HEX(unified_em
 
 print(emoticons)
 
-emo_sentiments <- read.csv("emo_sentiments.csv")
+emo_sentiments <- read.csv("emo_sentiments_by_hand.csv")
 
 # Add columns based on counts or specific logic
 emo_sentiments <- emo_sentiments %>%
@@ -189,7 +200,7 @@ write.csv(top_emoticons, "top_emotions.csv")
 global_catalogue_table <- data.frame()
 
 # Loop through each row in top_channels
-for (i in 2:nrow(top_channels)) {
+for (i in 1:nrow(top_channels)) {
   
   username <- top_channels$username[i]
   this_channel_id <- top_channels$channel_id[i]
@@ -320,7 +331,7 @@ for (i in 2:nrow(top_channels)) {
     mutate(
       positiveness = (total_positive - total_negative) / reactions_with_sentiment,
       neutrality = total_neutral / reactions_with_sentiment,
-      polarization = sqrt((total_positive + total_negative) / reactions_with_sentiment - positiveness)
+      polarization = sqrt((total_positive + total_negative) / reactions_with_sentiment - positiveness * positiveness)
     )
   
   grouped_data_summary <- grouped_data_summary %>%
@@ -341,18 +352,26 @@ for (i in 2:nrow(top_channels)) {
   catalogue_table <- tableGrob(extended_data, rows = NULL, theme = ttheme_default())
   
   
-# Generate PDF with the updated table
   pdf(file = paste0(output_folder, username, "_info.pdf"), width = 8, height = 10)
+  
+  # Ensure the graphics device is active
   grid.newpage()
+  
+  # Render the table into the PDF
+  grid.draw(catalogue_table)
+  
+  dev.off()
+  
 
+    
+#  grid.newpage()
   # Add plot
-  grid.raster(raster_image)
+#  grid.raster(raster_image)
 
   # Add the updated table
-  grid.newpage()
-  grid.draw(catalogue_table)
+#  grid.newpage()
+#  grid.draw(catalogue_table)
 
-  dev.off()
 
   # Create a tableGrob from the extended data
   catalogue_table <- tableGrob(extended_data, rows = NULL, theme = ttheme_default())
@@ -384,14 +403,18 @@ for (i in 2:nrow(top_channels)) {
       total_negative = sum(negative, na.rm = TRUE),
       total_positive = sum(positive, na.rm = TRUE),
       all_emoinfo = toString(unique(emoinfo)) 
-    )
+    ) # %>%
+#  filter(message_id == 72317)
+
+  
   
   message_totals <- message_totals %>%
     mutate(
       positiveness = (total_positive - total_negative) / reactions_with_sentiment,
       neutrality = total_neutral / reactions_with_sentiment,
-      polarization = sqrt((total_positive + total_negative) / reactions_with_sentiment - positiveness)
+      polarization = sqrt((total_positive + total_negative) / reactions_with_sentiment - positiveness*positiveness)
     )
+
 
   if(nrow(message_totals) >= 1)  {
     
@@ -400,6 +423,8 @@ for (i in 2:nrow(top_channels)) {
     list_messages(username,"positiveness", TRUE )    
 
     list_messages(username,"positiveness", FALSE )    
+
+    list_messages(username,"polarization", TRUE )    
     
         # Step 1: Filter top 10 messages by total_reaction_count
   }
@@ -410,6 +435,9 @@ for (i in 2:nrow(top_channels)) {
   } else {
     global_catalogue_table <- bind_cols(global_catalogue_table, extended_data[,2])
   }
+  
+  graphics.off()  # Close all open devices
+  
 }
 
 write.csv(global_catalogue_table, file.path(output_folder, "global_catalogue_table_wide.csv"), row.names = FALSE)
