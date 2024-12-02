@@ -85,20 +85,20 @@ for(i in (3:3))
 
   top_channels <- c_data %>%
     arrange(desc(reach_own)) %>%
-    head(if_else(i==3,30,20))
+    head(if_else(i==3,100,20))
   
   
   
   # Step 1: Filter messages_data for interactions between top_channels
   top_channel_ids <- top_channels$channel_id
   
-  interaction_data <- messages_data %>%
+      interaction_data_base <- messages_data %>%
     filter(channel_id %in% top_channel_ids & src_channel_id %in% top_channel_ids) %>%
     count(src_channel_id, channel_id) %>%
     complete(src_channel_id = top_channel_ids, channel_id = top_channel_ids, fill = list(n = 0))
  
   # Replace channel_id in interaction_data with corresponding username
-  interaction_data <- interaction_data %>%
+  interaction_data_base <- interaction_data_base %>%
     left_join(select(top_channels, channel_id, username), 
               by = c("src_channel_id" = "channel_id")) %>%
     rename(src_username = username) %>%
@@ -108,12 +108,12 @@ for(i in (3:3))
            dest_msg_count = msg_count) %>%
     select(src_username, dest_username, n, dest_msg_count)  # Keep only relevant columns
   
-  
+  interaction_data <- interaction_data_base %>%
+    select(src_username, dest_username, n)
+
   interaction_data <- interaction_data %>%
     mutate(n = if_else(n<5,0,n))
   
-  interaction_data <- interaction_data %>%
-    mutate(percent_received = n/dest_msg_count)
   
   # Step 2: Create the adjacency matrix from the completed interaction data
   interaction_matrix <- interaction_data %>%
@@ -154,11 +154,24 @@ for(i in (3:3))
 
   
   # relative graph
-  interaction_matrix_rel <- interaction_data %>%
-    pivot_wider(names_from = dest_username, values_from = percent_received, values_fill = 0) %>%
+  # Ensure that the necessary libraries are loaded
+  library(dplyr)
+  library(tidyr)
+  
+  # Step 1: Create interaction_data_rel with the calculated column
+  interaction_data_rel <- interaction_data_base %>%
+    mutate(percent_received = n / dest_msg_count) %>%
+    select(src_username, dest_username, percent_received) %>%
+    mutate(percent_received = if_else(percent_received < 0.001, 0, percent_received))
+  
+  # Step 2: Transform interaction_data_rel into a matrix
+  interaction_matrix_rel <- interaction_data_rel %>%
+    pivot_wider(names_from = dest_username, values_from = percent_received, values_fill = list(percent_received = 0)) %>%
     column_to_rownames(var = "src_username") %>%
     as.matrix()
   
+  # Check the result
+
   # Ensure row names are set and convert to matrix
   
   
