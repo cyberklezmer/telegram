@@ -19,7 +19,7 @@ library(grid)
 library(kableExtra)
 library(knitr)
 
-chnumber <- 100
+chnumber <- 10
 
 
 list_messages <- function(username, column, desc) {
