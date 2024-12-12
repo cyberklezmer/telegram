@@ -1,26 +1,16 @@
-library(DBI)
-library(psych)
-library(factoextra)
-library(gridExtra)
-library(RMySQL)
-library(dplyr)
-library(stringr)
-library(xtable)
-library(knitr)
-library(ggplot2)
-library(tidyr)
-library(stringr)
-library(igraph)
-library(ggraph)
-library(tibble)
-library(systemfonts)
-library(png)
-library(grid)
-library(kableExtra)
-library(knitr)
+source("defs.R")
 
-chnumber <- 10
 
+library(jsonlite)
+
+# emojinet_data <- fromJSON("src/emojinet_emojis.json",  flatten = TRUE)
+# emojinet_df <- as.data.frame(emojinet_data)
+# emojinet_df <- emojinet_df %>%
+#  unnest_wider(EncodeElement) # or unnest_longer() depending on the structure
+
+# write.csv(emojinet_df, "tmp/emojinet_data.csv")
+# str(emojinet_df)
+chnumber <- 2
 
 list_messages <- function(username, column, desc) {
   
@@ -97,33 +87,16 @@ list_messages <- function(username, column, desc) {
 
 }
 
-hex_to_text <- function(hex_strings) {
-  # Apply the conversion for each element in the vector
-  sapply(hex_strings, function(hex_string) {
-    # Split the hexadecimal string into pairs of two characters
-    hex_pairs <- substring(hex_string, seq(1, nchar(hex_string), 2), seq(2, nchar(hex_string), 2))
-    
-    # Convert the hex pairs to raw values
-    raw_values <- as.raw(strtoi(hex_pairs, base = 16))
-    
-    # Convert the raw values to a character string
-    rawToChar(raw_values)
-  })
-}
-
-
-
 # Define output folder for CSV and PDF
 output_folder <- "out/"
 
 # Connect to MySQL database
-con <- dbConnect(
-  MySQL(),
-  host = "bethel.utia.cas.cz",
-  user = "jak",
-  password = "jaknajaka",
-  dbname = "telegram_full"
-)
+
+con <- connect_db()
+
+top_emoticons <- init_emos(con)
+
+
 
 # Query the database for relevant data
 # catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
@@ -148,52 +121,19 @@ top_channels <- catalogue_data %>%
   arrange(desc(reach_own)) %>%
   head(chnumber)
 
-emoticons =  dbGetQuery(con, "SELECT *, HEX(emoticon) as hex_emo, HEX(unified_emo) as hex_u_emo FROM emoticons")
-
-print(emoticons)
-
-emo_sentiments <- read.csv("emo_sentiments_by_hand.csv")
-
-# Add columns based on counts or specific logic
-emo_sentiments <- emo_sentiments %>%
-  mutate(
-    negative_norm = Negative/ Occurrences,
-    neutral_norm = Neutral / Occurrences,
-    positive_norm = Positive / Occurrences
-  )
-
-
-print(emo_sentiments)
-      
-top_emoticons <- read.csv(file.path(output_folder, "top_emoticons_99.csv"))
-
-  
-top_emoticons <- top_emoticons %>%
-  left_join(emoticons, by = c("emo" = "hex_emo"))
-
-
-top_emoticons <- top_emoticons %>%
-  group_by(hex_u_emo,name) %>%
-  summarize(count = sum(count, na.rm = TRUE), .groups = "drop") %>%
-  select(count, hex_u_emo, name)
-
 top_emoticons <- top_emoticons %>%
     left_join(emo_sentiments, by = c("hex_u_emo" = "hexcode"))
 
-distinct_counts <- emoticons %>%
-  summarise(across(everything(), ~ n_distinct(.)))
+distinct_counts <- init_emos(con)
 
 print(distinct_counts)
-
-
 
 # Create a ranking based on descending "count" from top_emoticons
 top_emoticons <- top_emoticons %>%
   arrange(desc(count)) %>%  # Sort descending by count
   mutate(rank = row_number())  # Add rank for sorting
 
-write.csv(top_emoticons, "top_emotions.csv")
-
+write.csv(top_emoticons, paste0(output_folder,"top_emotions.csv"))
 
 # Add required library for table rendering
 
@@ -211,6 +151,8 @@ for (i in 1:nrow(top_channels)) {
   channel_data <- catalogue_data %>% filter(channel_id == this_channel_id)
   
   nsubscribers <- channel_data$subscribers
+  
+  
   
   # Query reactions data
   sqltext <- paste0("SELECT *, HEX(reaction_emo) as hex_r_emo FROM message_reactions WHERE channel_id=", this_channel_id)
@@ -331,7 +273,7 @@ for (i in 1:nrow(top_channels)) {
     mutate(
       positiveness = (total_positive - total_negative) / reactions_with_sentiment,
       neutrality = total_neutral / reactions_with_sentiment,
-      polarization = sqrt((total_positive + total_negative) / reactions_with_sentiment - positiveness * positiveness)
+      polarization = gini_coefficient(c(total_negative, total_neutral,total_positive))
     )
   
   grouped_data_summary <- grouped_data_summary %>%

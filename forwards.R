@@ -32,6 +32,23 @@ orange_ratio <- 3
 list_threshold <- 5
 
 
+min_src_size <- 50
+
+TBD
+
+sources <-  dbGetQuery(con,paste0("SELECT  src_channel_id,  COUNT(*) AS row_count   FROM 
+  messages
+  WHERE 
+  channel_id = ", this_channel_id, " AND src_channel_id IS NOT NULL  
+  GROUP BY 
+  src_channel_id
+  HAVING 
+  row_count > ", min_src_size," ORDER BY  row_count DESC"))
+
+
+
+
+
 compute_mode <- function(x) {
   uniq_x <- unique(x)            # Get unique values
   uniq_x[which.max(tabulate(match(x, uniq_x)))]  # Find the most frequent value
