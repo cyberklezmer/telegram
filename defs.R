@@ -21,6 +21,9 @@ library(knitr)
 
 # Define output folder for CSV and PDF
 output_folder <- "out/"
+graph_subfolder <- "graphs/" # Change this to your desired folder
+graph_output_folder <- paste0(output_folder,graph_subfolder)
+
 
 connect_db <- function() {
   dbConnect(

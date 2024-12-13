@@ -6,6 +6,7 @@ library(lubridate)
 library(purrr)
 
 anal_start <- as.POSIXct("2024-12-09 20:00:00")
+last_messages<- as.POSIXct("2024-12-10 20:00:00")
 anal_end <- as.POSIXct("2024-12-12 20:00:00")
 
 con <- connect_db()
@@ -13,14 +14,15 @@ con <- connect_db()
 top_emoticons <- init_emos(con)
 
 
-reaction_data <- dbGetQuery(con, "SELECT RH.channel_id, RH.message_id, HEX(RH.reaction_emo) as emo, count, RH.TS,
+reaction_data <- dbGetQuery(con, "SELECT RH.channel_id,  RH.message_id, HEX(RH.reaction_emo) as emo, count, RH.TS,
                               posted from reactions_history RH INNER JOIN messages M 
                             ON(RH.channel_id = M.channel_id AND RH.message_id = M.msg_id 
-AND RH.channel_id = 1535416724 and msg_id = 75599                            
                             )")
 
+#AND RH.channel_id = 1833277468  and (msg_id = 39335 or msg_id = 39336)
+
 reaction_data <- reaction_data %>%
-  filter(posted > anal_start)
+  filter(posted > anal_start & posted < last_messages)
 
 reaction_data <- reaction_data %>%
   arrange(channel_id, message_id, emo, TS) %>%
@@ -47,19 +49,127 @@ time_grid <- reaction_data %>%
   unnest(hourly_times) %>%
   rename(hourly_end = hourly_times)
 
-
+t
 # Calculate time differences and count increments
 
+
+
+
+
+
+# Calculate time differences and count increments, including hourly increases
 result <- reaction_data %>%
   mutate(hourly_end = floor(as.numeric(time_end))) %>%
-  full_join(time_grid, by = c("channel_id", "message_id", "emo", "hourly_end")) %>%
+  group_by(channel_id, message_id, emo, hourly_end) %>%
+  slice_max(order_by = TS, n = 1, with_ties = FALSE) %>%  # Keep the last row based on TS
+  ungroup() %>%
+  select(channel_id,message_id, emo, hourly_end,count)%>%
+  right_join(time_grid, by = c("channel_id", "message_id", "emo", "hourly_end")) %>%
   arrange(channel_id, message_id, emo, hourly_end) %>%
   group_by(channel_id, message_id, emo) %>%
-  fill(count, .direction = "down") %>%
+  fill(count, .direction = "down") %>% # Fill missing values in counts
+  mutate(hourly_increase = count - lag(count, default = 0)) %>% # Calculate hourly increase
   ungroup()
 
+# Write the result to a CSV
+write.csv(result, paste0(output_folder, "times.csv"))
 
-write.csv(result,paste0(output_folder,"times.csv"))
+result$emo_UTF8 <- hex_to_text(result$emo)
+
+# Iterate through each channel_id and message_id combination
+result %>%
+  group_by(channel_id, message_id) %>%
+  group_walk(~ {
+    data <- .x
+    
+    channel_id <- .y$channel_id
+    message_id <- .y$message_id
+    print(paste("Processing Channel:", channel_id, "Message:", message_id)) # Debug info
+    
+    
+    # Create the bar graph
+    p <- ggplot(data, aes(x = hourly_end, y = hourly_increase, fill = emo_UTF8)) +
+      geom_bar(stat = "identity", position = "stack") +
+      labs(
+        title = paste0("Channel: ", channel_id, 
+                       " | Message: ", message_id),
+        x = "Hour",
+        y = "Hourly Increase",
+        fill = "Emoticon"
+      ) +
+      theme_minimal()
+    
+    # Save the plot to a PNG file
+    output_file <- paste0(
+      graph_output_folder, 
+      "channel_", channel_id, 
+      "_message_", message_id, ".png"
+    )
+    ggsave(output_file, plot = p, width = 10, height = 6)
+  })
+
+
+channels <- dbGetQuery(con, "SELECT * FROM channels")
+
+mychannels <- result  %>% distinct(channel_id) %>%
+                left_join(channels,by = c("channel_id" = "id" ))
+
+for (i in 1:nrow(mychannels)) {
+  
+  username <- mychannels$username[i]
+  
+    html_text <-result %>%
+      filter(channel_id == mychannels$channel_id[i]) %>%
+       group_by(channel_id, message_id) %>%
+      mutate(
+         message_url = paste0("https://t.me/", username, "/", message_id),
+          embed_code = paste0(
+        "<script async src=\"https://telegram.org/js/telegram-widget.js?22\" data-telegram-post=\"",
+        username, "/", message_id, "\" data-width=\"100%\"></script> "
+      ),
+      message_link = sprintf("<a href='%s' target='_blank'>link</a>", message_url),
+      censor_point = round(censor_point),
+      info_code = paste0(
+        "URL ", message_link,
+        "<br>Len ", censor_point
+      ),
+      image_cell = paste0("<img src=\"",graph_subfolder,"channel_", unique(channel_id), 
+                     "_message_", unique(message_id), ".png\" alt=\"histogram\" width=\"600\">")
+    ) %>% 
+      ungroup()  %>% 
+      distinct(info_code, embed_code,image_cell)
+  
+  
+
+    library(kableExtra)
+    
+    html_table <- html_text %>%
+      kable(
+        format = "html",
+        escape = FALSE,
+        col.names = c("Info", "Message", "Emos")
+      ) %>%
+      kable_styling(
+        full_width = FALSE,
+        bootstrap_options = c("striped", "hover", "condensed")
+      ) %>%
+      column_spec(1, extra_css = "vertical-align: top;") %>% 
+      column_spec(2, extra_css = "vertical-align: top; width: 40%;") %>% # Set consistent width
+      column_spec(3, extra_css = "vertical-align: top; width: 40%;")     # Set consistent width
+    
+
+  # Step 2: Add the concatenated URL column
+  # Assuming 'username' and 'message_id' are columns in the original dataset or grouped_data
+  html_content <- paste0(
+    "<!DOCTYPE html><html><head><title>", username, "</title></head><body>",
+    "<h1>", username, "</h1>",
+    as.character(html_table),
+    "</body></html>"
+  )
+
+    output_file <- file.path(output_folder, paste0(username, "_emo_dists.html"))
+    writeLines(html_content, output_file)  
+}
 
 
 
