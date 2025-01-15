@@ -1,17 +1,8 @@
-library(RMySQL)
-library(dplyr)
+source("defs.R")
 
-# Define output folder for CSV and PDF
-output_folder <- "out/"
 
-# Connect to MySQL database
-con <- dbConnect(
-  MySQL(),
-  host = "bethel.utia.cas.cz",
-  user = "jak",
-  password = "jaknajaka",
-  dbname = "telegram_full"
-)
+
+con <- connect_db()
 
 # Query the database for relevant data
 emoticons <- dbGetQuery(

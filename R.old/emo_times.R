@@ -6,8 +6,8 @@ library(lubridate)
 library(purrr)
 
 anal_start <- as.POSIXct("2024-12-09 20:00:00")
-last_messages<- as.POSIXct("2024-12-28 20:00:00")
-anal_end <- as.POSIXct("2025-01-01 20:00:00")
+last_messages<- as.POSIXct("2024-12-10 20:00:00")
+anal_end <- as.POSIXct("2024-12-12 20:00:00")
 
 con <- connect_db()
 
@@ -72,7 +72,7 @@ result <- reaction_data %>%
   ungroup()
 
 # Write the result to a CSV
-write.csv(result, paste0(output_folder,islandid, "_times.csv"))
+write.csv(result, paste0(output_folder, "times.csv"))
 
 result$emo_UTF8 <- hex_to_text(result$emo)
 
@@ -101,8 +101,8 @@ result %>%
     
     # Save the plot to a PNG file
     output_file <- paste0(
-      graph_output_folder, islandid,
-      "_channel_", channel_id, 
+      graph_output_folder, 
+      "channel_", channel_id, 
       "_message_", message_id, ".png"
     )
     ggsave(output_file, plot = p, width = 10, height = 6)
@@ -167,7 +167,7 @@ for (i in 1:nrow(mychannels)) {
     "</body></html>"
   )
 
-    output_file <- file.path(output_folder, paste0(islandid,"_",username, "_emo_dists.html"))
+    output_file <- file.path(output_folder, paste0(username, "_emo_dists.html"))
     writeLines(html_content, output_file)  
 }
 

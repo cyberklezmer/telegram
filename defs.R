@@ -19,6 +19,9 @@ library(grid)
 library(kableExtra)
 library(knitr)
 
+islandid <- 'CZ'
+islandcondition <- 'lang = "CZECH"'
+
 # Define output folder for CSV and PDF
 output_folder <- "out/"
 graph_subfolder <- "graphs/" # Change this to your desired folder
@@ -68,21 +71,83 @@ hex_to_text <- function(hex_strings) {
 }
 
 
+init_forwards <- function(con, top_channels) {
+  
+  forwards_data <- dbGetQuery(con, "SELECT * from forwards")
+  
+  forwards_data <- forwards_data %>%
+    inner_join(top_channels, by = c("channel_id" = "channel_id")) %>%
+    rename(dst_username = username )  %>%
+    inner_join(top_channels, by = c("src_channel_id" = "channel_id")) %>%
+    rename(src_username = username )  
+  
+  return(forwards_data)
+}
 
+
+get_reactions <- function(con, this_channel_id, top_emoticons) {
+  
+  sqltext <- paste0("SELECT *, HEX(reaction_emo) as hex_r_emo FROM message_reactions WHERE channel_id=", this_channel_id)
+  reactions_data <- dbGetQuery(con, sqltext)
+  
+  emoticons =  dbGetQuery(con, "SELECT *, HEX(emoticon) as hex_emo, HEX(unified_emo) as hex_u_emo FROM emoticons")
+  
+  
+  # Joining reactions_data with emoticons
+  merged_data <- reactions_data %>%
+    left_join(emoticons, by = c("hex_r_emo" = "hex_emo"))
+  
+  
+  # Group and summarize
+  grouped_data <- merged_data %>%
+    mutate(hex_u_emo = if_else(is.na(hex_u_emo), "other", hex_u_emo)) %>%
+    group_by(channel_id,message_id,hex_u_emo) %>%
+    summarise(u_count = sum(count, na.rm = TRUE), .groups = 'drop')%>%
+    select(channel_id, message_id, hex_u_emo,u_count)
+  
+  grouped_data <- grouped_data %>%
+    left_join(top_emoticons, by = "hex_u_emo")
+  
+  
+}
+
+group_reactions <- function(reactions_src)  {
+  result <- reactions_src %>%
+    group_by(channel_id,message_id)  %>%
+    summarise( count = sum(u_count, na.rm = TRUE), 
+               positivity = sum(Positivity, na.rm = TRUE),
+               positivity_sq = sum(Positivity^2, na.rm = TRUE),
+               .groups = 'drop') %>%
+    select(channel_id,message_id,count,positivity,positivity_sq)
+  return(result)
+}
+
+init_channels <- function(con, chnumber) {
+  
+  catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
+             msg_count, reaction_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (lang = 'CZECH' or lang = 'SLOVAK')")
+  
+  catalogue_data <- catalogue_data %>%
+    mutate(subscribers = if_else(
+      str_detect(subscribers, "K"),
+      as.numeric(str_replace(subscribers, "K", "")) * 1000,
+      if_else(
+        str_detect(subscribers, "M"),as.numeric(str_replace(subscribers, "M", "")) * 1000000, as.numeric(subscribers))
+    ))
+  
+  catalogue_data <- catalogue_data %>%
+    mutate(reach_own = subscribers * msg_count)
+  
+  top_channels <- catalogue_data %>%
+    arrange(desc(reach_own)) %>%
+    head(chnumber)
+  return(top_channels)
+}
 
 init_emos <- function(con) {
   emoticons =  dbGetQuery(con, "SELECT *, HEX(emoticon) as hex_emo, HEX(unified_emo) as hex_u_emo FROM emoticons")
   
-  emo_sentiments <- read.csv("emo_sentiments_by_hand.csv")
-  
-  # Add columns based on counts or specific logic
-  emo_sentiments <- emo_sentiments %>%
-    mutate(
-      negative_norm = Negative/ Occurrences,
-      neutral_norm = Neutral / Occurrences,
-      positive_norm = Positive / Occurrences
-    )
-  
+  emo_sentiments <- read.csv("emo_sentiments_novak_et_al.csv")
   
   print(emo_sentiments)
   
@@ -104,8 +169,6 @@ init_emos <- function(con) {
   distinct_counts <- emoticons %>%
     summarise(across(everything(), ~ n_distinct(.)))
   
-  print(distinct_counts)
-  
   # Create a ranking based on descending "count" from top_emoticons
   top_emoticons <- top_emoticons %>%
     arrange(desc(count)) %>%  # Sort descending by count
@@ -113,6 +176,7 @@ init_emos <- function(con) {
   
   return(top_emoticons)
 }  
+
 
 
 # Connect to MySQL database
