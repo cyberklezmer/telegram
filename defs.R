@@ -38,6 +38,18 @@ connect_db <- function() {
   )
 }
 
+get_catalogue <- function(con,islandcondition) {
+  csqltxt <- paste0("SELECT channel_id	,last_message	,lm_posted	,username	,sources	,account	,subscribers	,catalogue_count	,channel_created	,last_known_message	,file_min_msg	,file_max_msg	,msg_count	,reaction_count	,forwarded_from	,forwarded_to	,lang,	
+                    CONVERT(name USING ASCII) as name FROM channels_info WHERE (sources LIKE '%T%' AND ", islandcondition, " )")
+  
+  # Query the database for relevant data
+  catalogue_data <- dbGetQuery(con, csqltxt   )
+  catalogue_data <- catalogue_data %>%
+    mutate(reach_own = subscribers * msg_count)
+  
+  return(catalogue_data)
+}
+
 gini_coefficient <- function(counts) {
   # Values are fixed as -1, 0, 1
   values <- c(-1, 0, 1)
