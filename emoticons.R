@@ -10,7 +10,6 @@ library(jsonlite)
 
 # write.csv(emojinet_df, "tmp/emojinet_data.csv")
 # str(emojinet_df)
-chnumber <- 2
 
 list_messages <- function(username, column, desc) {
   
@@ -103,9 +102,7 @@ top_emoticons <- init_emos(con)
 
 catalogue_data <- get_catalogue(con,islandcondition)
 
-top_channels <- catalogue_data %>%
-  arrange(desc(reach_own)) %>%
-  head(chnumber)
+top_channels <- get_top_channels(con, catalogue_data)
 
 
 # Add required library for table rendering

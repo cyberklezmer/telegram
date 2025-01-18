@@ -22,6 +22,14 @@ library(knitr)
 islandid <- 'CZ'
 islandcondition <- 'lang = "CZECH"'
 
+num_channels <- 30
+# get_top_channles function bellow will return use first num_channels by varioaus criteria. 
+
+# start_date <- as.Date("2024-03-04")
+start_date <- as.Date("2024-08-02")
+end_date <- as.Date("2024-09-29")
+
+
 # Define output folder for CSV and PDF
 output_folder <- "out/"
 graph_subfolder <- "graphs/" # Change this to your desired folder
@@ -46,8 +54,29 @@ get_catalogue <- function(con,islandcondition) {
   catalogue_data <- dbGetQuery(con, csqltxt   )
   catalogue_data <- catalogue_data %>%
     mutate(reach_own = subscribers * msg_count)
+  catalogue_data <- catalogue_data %>%
+    mutate(
+      accepted = forwarded_to / msg_count,
+      sent = forwarded_from / msg_count,
+      reactions_per_msessge = reaction_count / msg_count,
+      reactions_per_user = reaction_count / subscribers,
+      reactions_per_msg_user = reaction_count / subscribers / msg_count
+    )
   
   return(catalogue_data)
+}
+
+get_top_channels <- function(con,catalogue_data) {
+  
+  result1 <- catalogue_data %>%
+    arrange(desc(reach_own)) %>%
+    head(num_channels)
+  result2 <- catalogue_data %>%
+    arrange(desc(msg_count)) %>%
+    head(num_channels)
+  final_result <- bind_rows(result1, result2) %>%
+    distinct(username, .keep_all = TRUE)
+  return(final_result)
 }
 
 gini_coefficient <- function(counts) {

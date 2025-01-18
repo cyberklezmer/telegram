@@ -1,7 +1,6 @@
 # identifies top channles by reach, evaluates distribution of accepting/forwarding and makes a graph of proximity
 
 # number of channels in graph and stats
-num_channels <- 25
 
 
 # treshold for displaying of a line in graph
@@ -17,9 +16,7 @@ catalogue_data <- get_catalogue(con,islandcondition)
 
 messages_data <-  dbGetQuery(con,"SELECT channel_id, src_channel_id FROM messages" )
 
-top_channels <- catalogue_data %>%
-  arrange(desc(reach_own)) %>%
-  head(num_channels)
+top_channels <- get_top_channels(con, catalogue_data)
 
 
 

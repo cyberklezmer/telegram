@@ -1,4 +1,3 @@
-chnumber <- 15
 
 inisig_hist <- 20
 
@@ -42,7 +41,7 @@ compute_mode <- function(x) {
 # catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
 #             msg_count, reaction_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (source = 'slerka')")
 
-
+tbd predelat
 catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
              msg_count, reaction_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (lang = 'CZECH' or lang = 'SLOVAK')")
 
@@ -57,9 +56,7 @@ catalogue_data <- catalogue_data %>%
 catalogue_data <- catalogue_data %>%
   mutate(reach_own = subscribers * msg_count)
 
-top_channels_reach <- catalogue_data %>%
-  arrange(desc(reach_own)) %>%
-  head(chnumber)
+top_channels_reach <- get_top_channels(con, catalogue_data)
 
 top_channels_to <- catalogue_data %>%
   arrange(desc(forwarded_to)) %>%
