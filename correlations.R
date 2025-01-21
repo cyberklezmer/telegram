@@ -136,26 +136,65 @@ agg_messages_complete <- agg_messages_complete %>%
 
 
 # Proceed with de-trending and deseasonalization
+library(dplyr)
+
+# Initialize an empty data frame to store coefficients
+coefficients_data <- data.frame(
+  username = character(),
+  trend_intercept = numeric(),
+  trend_slope = numeric(),
+  weekday_coefficients = list(),
+  stringsAsFactors = FALSE
+)
+
+
+# Initialize an empty list to store coefficients for each user
+coefficients_list <- list()
+
 agg_residuals <- agg_messages_complete %>%
   group_by(username) %>%
   do({
     data <- .
     
-    # Remove linear trend
-    trend_model <- lm(message_count ~ as.numeric(posted_date), data = data)
+    # Remove linear trend and day-of-week seasonality
+    trend_model <- lm(message_count ~ as.numeric(posted_date) + weekday, data = data)
     trend_removed <- residuals(trend_model)
-    data$trend_removed <- trend_removed
+    data$residuals <- ifelse(data$message_count == 0, NA, trend_removed)
+    data$residuals_nn <- ifelse(data$message_count == 0, 0, trend_removed)
     
-    # Remove day-of-week seasonality
-    season_model <- lm(trend_removed ~ weekday, data = data)
-     data$residuals <- ifelse(data$message_count == 0, NA, residuals(season_model))
-     
-     data$residuals_nn <- ifelse(data$message_count == 0, 0, residuals(season_model))
-     # data$residuals <- residuals(season_model)
+    # Extract coefficients and their standard errors
+    trend_summary <- summary(trend_model)
+    trend_coeff <- coef(trend_model)
+    trend_se <- coef(trend_summary)[, "Std. Error"] # Correctly extract std errors for all coefficients
+    trend_zs <- abs(trend_coeff/trend_se)
+    
+    # Prepare coefficients and standard errors as named lists
+    coeffs <- as.list(trend_coeff)
+    ses <- as.list(trend_se)
+    zs <- as.list(trend_zs)
+    names(ses) <- paste0("se_", names(coeffs))
+    names(zs) <- paste0("z_", names(coeffs))
+    
+    # Combine all coefficients and standard errors into a single named list
+    cl <- c(
+      list(username = unique(data$username)), # Ensure username is unique
+      coeffs,
+      ses,
+      zs
+    )
+    
+    # Append coefficients to the list
+    coefficients_list[[length(coefficients_list) + 1]] <<- cl
+    
     data
   }) %>%
   ungroup()
 
+# Convert list to a data frame
+coefficients_data <- bind_rows(coefficients_list)
+
+# Check the stored coefficients
+print(coefficients_data)
 
 write.csv(agg_residuals,paste0(output_folder,islandid,"_app_residuals.csv"))
 

@@ -22,7 +22,7 @@ library(knitr)
 islandid <- 'CZ'
 islandcondition <- 'lang = "CZECH"'
 
-num_channels <- 30
+num_channels <- 10
 # get_top_channles function bellow will return use first num_channels by varioaus criteria. 
 
 # start_date <- as.Date("2024-03-04")
