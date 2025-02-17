@@ -5,8 +5,8 @@ test_treshold <- 2.5
 orange_ratio <- 3
 
 list_threshold <- 5
-
-
+chnumber <- 5
+ 
 min_src_size <- 50
 
 
@@ -14,20 +14,7 @@ source("defs.R")
 
 con <- connect_db()
 
-
-
-
-sources <-  dbGetQuery(con,paste0("SELECT  src_channel_id,  COUNT(*) AS row_count   FROM 
-  messages
-  WHERE 
-  channel_id = ", this_channel_id, " AND src_channel_id IS NOT NULL  
-  GROUP BY 
-  src_channel_id
-  HAVING 
-  row_count > ", min_src_size," ORDER BY  row_count DESC"))
-
-
-
+catalogue_data <- get_catalogue(con,islandcondition)
 
 
 compute_mode <- function(x) {
@@ -41,22 +28,6 @@ compute_mode <- function(x) {
 # catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
 #             msg_count, reaction_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (source = 'slerka')")
 
-tbd predelat
-catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
-             msg_count, reaction_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (lang = 'CZECH' or lang = 'SLOVAK')")
-
-catalogue_data <- catalogue_data %>%
-  mutate(subscribers = if_else(
-    str_detect(subscribers, "K"),
-    as.numeric(str_replace(subscribers, "K", "")) * 1000,
-    if_else(
-      str_detect(subscribers, "M"),as.numeric(str_replace(subscribers, "M", "")) * 1000000, as.numeric(subscribers))
-  ))
-
-catalogue_data <- catalogue_data %>%
-  mutate(reach_own = subscribers * msg_count)
-
-top_channels_reach <- get_top_channels(con, catalogue_data)
 
 top_channels_to <- catalogue_data %>%
   arrange(desc(forwarded_to)) %>%
@@ -66,11 +37,13 @@ top_channels_from <- catalogue_data %>%
   arrange(desc(forwarded_from)) %>%
   head(chnumber)
 
+top_channels_reach <- get_top_channels(con, catalogue_data,chnumber)
+
+
 top_channels <- bind_rows(top_channels_reach, top_channels_to, top_channels_from) %>%
   distinct()
 
 
-global_catalogue_table <- data.frame()
 
 # Loop through each row in top_channels
 
@@ -148,17 +121,39 @@ global_catalogue_table <- data.frame()
 
   write.csv(merged_data,paste0(output_folder,"data_for_grid.csv"))
   
+
+  # Create a new df grouped by src_username and dst_username with the first bar_color
+  df_grouped <- merged_data %>%
+    group_by(src_username, dst_username) %>%
+    summarise(bar_color = first(bar_color), .groups = "drop")
+  
+  df_count <- df_grouped %>%
+    group_by(src_username) %>%
+    summarise(
+      black_count = sum(bar_color == "black"),
+      red_count = sum(bar_color == "red"),
+      .groups = "drop"
+    )
+  
+  output_file_name <- paste0(output_folder, islandid, "_forwards_times_res.csv")
+
+  write.csv(df_count,output_file_name)
+  
+    
   output_pdf <- paste0(output_folder, islandid, "_forward_time_histograms_colored_start1.pdf")
   
     
-  # Create a faceted plot with forced x-axis starting from 1 and colored bars
   p <- ggplot(merged_data, aes(x = cat_forward_time, fill = bar_color)) +
     geom_histogram(stat = "count", binwidth = 1, color = "white", alpha = 0.7) +
-    scale_fill_manual(values = c("red" = "red", "darkgreen" = "darkgreen", "grey" = "grey", "black" = "black")) +
+    scale_fill_manual(
+      values = c("red" = "red", "darkgreen" = "darkgreen", "grey" = "grey", "black" = "black"),
+      labels = c("red" = paste0("<",orange_ratio, "x LP Norm"), "darkgreen" = "Normal", "grey" = "Insig", "black" = "Mode <=2")
+    ) +
     scale_x_continuous(breaks = 0:8, limits = c(0, 8)) +
     labs(
       x = "t",
-      y = "freq"
+      y = "freq",
+      fill = "Risk Level"  # Custom legend title
     ) +
     theme_minimal() +
     facet_grid(rows = vars(src_username), cols = vars(dst_username), scales = "free") +
@@ -166,11 +161,12 @@ global_catalogue_table <- data.frame()
       strip.text.x = element_text(angle = 45, hjust = 1),
       strip.text.y = element_text(angle = 0)
     )
-  # Save the plot to a PDF
   
+  # Save the plot to a PDF
+
 
   
-  ggsave(output_pdf, plot = p, width = 16, height = 12)
+  ggsave(output_pdf, plot = p, width = 17, height = 12)
   
     
   

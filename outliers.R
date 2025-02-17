@@ -77,7 +77,9 @@ result <- detect_outliers(catalogue_data, "reactions_per_msg_user")
 catalogue_data <- result$data
 reactions_upper <- result$upper_bound
 # Display the dataset with outlier flags
-write.csv(catalogue_data, paste0(output_folder, islandid, "_outliers.csv"))
+result_data <- catalogue_data %>%
+    select(username,reactions_per_msg_user_outlier_prob,accepted_outlier_prob)
+write.csv(result_data, paste0(output_folder, islandid, "_outliers_res.csv"))
 
 # messages_data <- get_messages(con)  
 
@@ -107,26 +109,30 @@ pdf(paste0(output_folder, islandid, "_distributions_outliers_with_stats.pdf"))
 # Display summary table in the PDF
 print(grid.table(summary_table))
 
+dev.off()
+
+
 # Plot distribution for 'accepted'
-print(
-  ggplot(catalogue_data, aes(x = accepted)) +
+
+p<- ggplot(catalogue_data, aes(x = accepted)) +
     geom_histogram(bins = 20, fill = "lightgreen", color = "black", alpha = 0.7) +
     geom_vline(xintercept = accepted_upper, color = "red", linetype = "dashed") +
     labs(title = "Distribution of accepted", x = "accepted", y = "Frequency") +
     theme_minimal()
-)
 
 # Plot distribution for 'reactions_per_msg_user'
-print(
-  ggplot(catalogue_data, aes(x = reactions_per_msg_user)) +
+
+q<-  ggplot(catalogue_data, aes(x = reactions_per_msg_user)) +
     geom_histogram(bins = 20, fill = "orange", color = "black", alpha = 0.7) +
     geom_vline(xintercept = reactions_upper, color = "red", linetype = "dashed") +
     labs(title = "Distribution of reactions_per_msg_user", x = "reactions_per_msg_user", y = "Frequency") +
     theme_minimal()
-)
+
+pdf(paste0(output_folder, islandid, "_distributions_outliers.pdf"), width = 10, height = 5)  # Adjust width and height as needed
+grid.arrange(p, q, ncol = 2)
+dev.off()
 
 # Close the PDF
-dev.off()
 
 
 # Close the database connectionint

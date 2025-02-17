@@ -8,13 +8,17 @@ library(lubridate)
 library(forecast)
 source("defs.R")
 
+start_date <- as.Date("2024-08-02")
+end_date <- as.Date("2024-09-29")
+
+
 con <- connect_db()
 
 
 catalogue_data <- get_catalogue(con,islandcondition)
 
 
-top_channels <- get_top_channels(con, catalogue_data)
+top_channels <- get_top_channels(con, catalogue_data,10)
 
 
 # Save to CSV file
@@ -82,15 +86,25 @@ agg_messages_split <- agg_messages %>%
 
 
 # Create the grid plot using facet_wrap with ordered username
+
+agg_messages_split <- agg_messages_split %>%
+  mutate(posted_date = as.Date(posted_date))
+
 p <- ggplot(agg_messages_split, aes(x = posted_date, y = count, fill = forwarded)) +
   geom_bar(stat = "identity", position = "stack") +
-  facet_wrap(~ username, ncol = 5, scales = "free_x") +  # Use ordered username for facets
+  facet_wrap(~ username, ncol = 5, scales = "free_x") +
   labs(title = "Message Time Series for Top Channels",
        x = "Date",
        y = "Number of Messages",
        fill = "Message Type") +
+  scale_x_date(date_breaks = "2 weeks", date_labels = "%b %Y") +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(size = 18, face = "bold") # Increase title size
+  )
+
+
 
 # Save the plot as a PDF
 ggsave(paste0(output_folder, islandid, "_top_channels_messages.pdf"), plot = p, width = 15, height = 10)
@@ -135,8 +149,6 @@ agg_messages_complete <- agg_messages_complete %>%
   mutate(message_count = as.numeric(message_count))
 
 
-# Proceed with de-trending and deseasonalization
-library(dplyr)
 
 # Initialize an empty data frame to store coefficients
 coefficients_data <- data.frame(
@@ -243,13 +255,16 @@ heatmap_data <- as.data.frame(as.table(partial_correlations_masked)) %>%
   rename(Variable1 = Var1, Variable2 = Var2, Correlation = Freq)
 
 # Create the heatmap
-p<- ggplot(heatmap_data, aes(x = Variable1, y = Variable2, fill = Correlation)) +
+p <- ggplot(heatmap_data, aes(x = Variable1, y = Variable2, fill = Correlation)) +
   geom_tile(color = "white") +
-  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+  scale_fill_gradient2(low = "white", high = "red", mid = "white", 
                        midpoint = 0, limit = c(-1, 1), 
                        name = "Partial Correlation") +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14)
+  ) +
   labs(title = "Heatmap of Significant Partial Correlations",
        x = "Channel (Username)", y = "Channel (Username)")
 
@@ -300,16 +315,39 @@ heatmap_data <- as.data.frame(as.table(correlations_masked)) %>%
 # Create the heatmap
 p <- ggplot(heatmap_data, aes(x = Variable1, y = Variable2, fill = Correlation)) +
   geom_tile(color = "white") +
-  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+  scale_fill_gradient2(low = "white", high = "red", mid = "white", 
                        midpoint = 0, limit = c(-1, 1), 
                        name = "Correlation") +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14)
+  ) +
   labs(title = "Heatmap of Significant Correlations",
        x = "Channel (Username)", y = "Channel (Username)")
 
 # Save the heatmap
 ggsave(paste0(output_folder, islandid, "_correlation_heatmap.pdf"), plot = p, width = 15, height = 15)
+
+
+library(dplyr)
+library(tidyr)
+
+# Create a matrix to store significant positive correlations
+significant_cor <- (cor_results > 0) & (p_values < 0.05)
+
+# Create a matrix to store significant positive partial correlations
+significant_pcor <- (partial_correlations > 0) & (pcor_results$p.value < 0.05)
+
+# Create a dataframe with counts for each row (variable)
+cor_summary <- data.frame(
+  Variable = colnames(message_matrix),
+  Positive_Significant_Cor = rowSums(significant_cor, na.rm = TRUE)-1,
+  Positive_Significant_Partial_Cor = rowSums(significant_pcor, na.rm = TRUE)-1
+)
+
+# Write the results to a CSV file
+write.csv(cor_summary, file.path(output_folder, paste0(islandid, "_msg_stat_and_coordination_res.csv")), row.names = FALSE)
 
 
 # Close the database connectionint

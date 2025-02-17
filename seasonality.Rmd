@@ -1,0 +1,82 @@
+---
+title: "My Report"
+output: html_document
+params:
+  rmd_par_island: 'ALL'
+  threshold: 20  # ninimal number of reactions to be included in istimation
+  num_channels: 20
+
+
+---
+
+```{r setup}
+
+# numbef of daily seasonal coefs
+nseasonal <- 12
+
+# number of half - our bins to examine
+A <- 12
+
+anal_start_str <- "2024-09-01 00:00:00"
+last_message_str <- "2024-10-01 00:00:00"
+anal_start <- as.POSIXct(anal_start_str)
+last_messages<- as.POSIXct(last_message_str)
+
+
+source("defs.R")
+
+
+library(lubridate)
+library(purrr)
+con <- connect_db()
+
+top_emoticons <- init_emos(con)
+
+
+
+dbDisconnect(con)
+
+```
+
+```{r messages periodicity}
+
+con <- connect_db()
+
+catalogue <- get_catalogue(con,islandcondition)
+
+top_channels <- get_top_channels(con,catalogue, params$num_channels) 
+
+
+messages_data <- dbGetQuery(con, paste0("
+    SELECT channel_id, msg_id, posted
+    FROM messages
+    WHERE posted > '",anal_start_str,
+    "' AND posted < '",last_message_str,"'"))
+
+messages_data <- messages_data %>%     
+   mutate(time_t = 2 * as.numeric(difftime(posted, anal_start, units = "hours")),
+   J_tau =  (((round(time_t)) %/% (48 / nseasonal)) %% nseasonal) + 1)  
+
+# Assuming top_channels is a vector of channel_ids
+filtered_data <- messages_data %>%
+  filter(channel_id %in% top_channels$channel_id) %>%
+  left_join(top_channels, by = "channel_id" ) %>%
+  group_by(username, J_tau) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(username) %>%
+  mutate(rel_freq = count / sum(count))  # Calculate relative frequency
+
+# Plot using ggplot2
+ggplot(filtered_data, aes(x = J_tau, y = rel_freq, fill = factor(J_tau))) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ username, scales = "free_y") +  # Grid layout for channels
+  labs(title = "Relative Frequencies of J_tau per Channel",
+       x = "J_tau",
+       y = "Relative Frequency") +
+  theme_minimal() +
+  theme(legend.position = "none")  
+
+dbDisconnect(con)
+
+```
+

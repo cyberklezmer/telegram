@@ -20,7 +20,7 @@ calculate_entropy <- function(counts, K) {
     
     # Miller–Madow correction term
  #   H_mm <- H_mle + (K - 1) / (2 * n)
-    H_penalized <- H_mle + 5 / n
+    H_penalized <- H_mle + K / n
     return(H_penalized)
   }
 
@@ -36,10 +36,13 @@ con <- connect_db()
 
 messages_df <- dbGetQuery(con,"SELECT channel_id, src_channel_id, count(msg_id) as num_msgs FROM messages WHERE src_channel_id IS NOT NULL GROUP BY channel_id, src_channel_id")
 
-K <- n_distinct(messages_df$src_channel_id)
+K <- 10
 
 # Join the data
 
+catalogue_data <- get_catalogue(con,islandcondition)
+
+top_channels <- get_top_channels(con, catalogue_data,10)
 
 # Compute entropy for each channel_id
 entropy_data <- messages_df %>%
@@ -54,13 +57,14 @@ entropy_data <- messages_df %>%
 
 
 
-catalogue_data <- get_catalogue(con,islandcondition)
 
 entropy_data <- entropy_data %>%
-  left_join(catalogue_data, by = "channel_id")  %>%
+  inner_join(top_channels, by = "channel_id")  %>%
   arrange(entropy)
              
-write.csv(entropy_data,paste0(output_folder,islandid,"_entropy_data.csv"))
+result_data <- entropy_data %>% dplyr::select(username, entropy)
+
+write.csv(result_data,paste0(output_folder,islandid,"_concentration_res.csv"))
 
 # Assuming messages_df is your data frame with columns channel_id and msg_count
 # If not already done, group the data and calculate the frequencies
@@ -81,9 +85,13 @@ plot_df <- messages_df %>%
 
 # Function to generate histogram for a specific username
 plot_histogram <- function(username, data) {
-  ggplot(data %>% filter(username == !!username), aes(x = msg_count_rank, y = proportion)) +
+  user_data <- data %>% filter(username == !!username)
+  
+  ggplot(user_data, aes(x = msg_count_rank, y = proportion)) +
     geom_bar(stat = "identity", fill = "blue", color = "black") +
-    ggtitle(paste( username, " : ")) +
+    ggtitle(paste0(substr(username, 1, 11), ": ", 
+                   round(user_data$entropy[1], 2), 
+                   " (", user_data$num_msgs[1], ")")) +
     xlab("Message Count Rank") +
     ylab("Proportion of Total Messages")
 }
@@ -97,7 +105,7 @@ plot_list <- lapply(usernames, function(user) {
 })
 
 # Save plots to PDF
-pdf(paste(output_folder,islandid,"_top_entropy_histograms.pdf"), width = 11, height = 50) # Adjust dimensions if needed
+pdf(paste0(output_folder,islandid,"_top_entropy_histograms.pdf"), width = 11, height = 8) # Adjust dimensions if needed
 grid.arrange(grobs = plot_list, ncol = 4) # Adjust ncol for grid arrangement
 dev.off()
 

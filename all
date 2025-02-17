@@ -1,0 +1,7 @@
+#!/bin/bash
+
+Rscript $1 CZ 
+Rscript $1 PL 
+Rscript $1 DE 
+
+

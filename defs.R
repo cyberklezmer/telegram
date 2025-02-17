@@ -19,15 +19,34 @@ library(grid)
 library(kableExtra)
 library(knitr)
 
-islandid <- 'CZ'
-islandcondition <- 'lang = "CZECH"'
 
-num_channels <- 10
-# get_top_channles function bellow will return use first num_channels by varioaus criteria. 
+args <- commandArgs(trailingOnly = TRUE)
+
+# Check if any arguments were provided
+if (length(args) == 0) {
+  if(exists("rmd_par_island")) {
+    islandid <- params$rmd_par_island
+  }
+  else
+  {
+    islandid <- 'CZ'
+  }
+} else {
+  islandid <- args[1]
+}
+
+if( islandid == "CZ") {
+   islandcondition <- 'sources LIKE "%T%"'
+} else if( islandid == "DE") {
+  islandcondition <- 'sources LIKE "%G%"'
+} else if( islandid == "PL") {
+  islandcondition <- 'sources LIKE "%P%"'
+} else if( islandid == "ALL") {
+  islandcondition <- '(sources LIKE "%P%") or (sources LIKE "%G%") or (sources LIKE "%T%")'
+} else { stop(paste0("Unknown island abbreviation ", islandid)) }
+  
 
 # start_date <- as.Date("2024-03-04")
-start_date <- as.Date("2024-08-02")
-end_date <- as.Date("2024-09-29")
 
 
 # Define output folder for CSV and PDF
@@ -48,8 +67,7 @@ connect_db <- function() {
 
 get_catalogue <- function(con,islandcondition) {
   csqltxt <- paste0("SELECT channel_id	,last_message	,lm_posted	,username	,sources	,account	,subscribers	,catalogue_count	,channel_created	,last_known_message	,file_min_msg	,file_max_msg	,msg_count	,reaction_count	,forwarded_from	,forwarded_to	,lang,	
-                    CONVERT(name USING ASCII) as name FROM channels_info WHERE (sources LIKE '%T%' AND ", islandcondition, " )")
-  
+                    CONVERT(name USING ASCII) as name FROM channels_info WHERE (",islandcondition, " )")
   # Query the database for relevant data
   catalogue_data <- dbGetQuery(con, csqltxt   )
   catalogue_data <- catalogue_data %>%
@@ -66,7 +84,7 @@ get_catalogue <- function(con,islandcondition) {
   return(catalogue_data)
 }
 
-get_top_channels <- function(con,catalogue_data) {
+get_top_channels <- function(con,catalogue_data, num_channels) {
   
   result1 <- catalogue_data %>%
     arrange(desc(reach_own)) %>%
@@ -189,9 +207,7 @@ init_emos <- function(con) {
   emoticons =  dbGetQuery(con, "SELECT *, HEX(emoticon) as hex_emo, HEX(unified_emo) as hex_u_emo FROM emoticons")
   
   emo_sentiments <- read.csv("emo_sentiments_novak_et_al.csv")
-  
-  print(emo_sentiments)
-  
+
   top_emoticons <- read.csv(file.path(output_folder, "top_emoticons_99.csv"))
   
   

@@ -1,0 +1,347 @@
+---
+title: "My Report"
+output: html_document
+params:
+  rmd_par_island: 'ALL'
+  threshold: 20  # ninimal number of reactions to be included in istimation
+  num_channels: 20
+
+
+---
+
+```{r setup}
+
+# numbef of daily seasonal coefs
+nseasonal <- 12
+
+# number of half - our bins to examine
+A <- 12
+
+anal_start_str <- "2025-01-30 00:00:00"
+anal_start <- as.POSIXct(anal_start_str)
+last_message_str <- "2025-02-15 10:00:00"
+last_messages<- as.POSIXct(last_message_str)
+anal_end <- as.POSIXct("2025-02-16 10:00:00")
+
+source("defs.R")
+
+
+library(lubridate)
+library(purrr)
+con <- connect_db()
+
+top_emoticons <- init_emos(con)
+
+
+
+dbDisconnect(con)
+
+```
+
+
+```{r whole code}
+
+log_str <- c("")  # One-column log
+
+
+
+con <- connect_db()
+
+reaction_data <- dbGetQuery(con, "SELECT RH.channel_id,  RH.message_id, HEX(RH.reaction_emo) as emo, count, RH.TS,
+                              posted from reactions_history RH INNER JOIN messages M 
+                            ON(RH.channel_id = M.channel_id AND RH.message_id = M.msg_id 
+                            ) 
+#                            WHERE  RH.message_id = 31430
+                            ")
+
+
+reaction_data <- reaction_data %>%
+  filter(posted > anal_start & posted < last_messages & TS >= anal_start)
+
+
+
+reaction_data <- reaction_data %>%
+  arrange(channel_id, message_id, emo, TS) %>%
+  group_by(channel_id, message_id, emo) %>%
+  mutate(delta_count = count - lag(count, default = 0))  %>% 
+  ungroup()
+
+summary_df <- reaction_data %>%
+  group_by(channel_id, message_id, TS, posted) %>%
+  summarize(C = sum(delta_count, na.rm = TRUE), .groups = "drop")
+
+log_str <- c(log_str,paste(nrow(summary_df),"before filtering"))
+
+# Filter out messages where sum of C is less than threshold
+summary_df <- summary_df %>%
+  group_by(channel_id, message_id) %>%
+  filter(sum(C, na.rm = TRUE) >= params$threshold) %>%
+  ungroup()
+
+top_msgs <-  summary_df %>%
+  group_by(channel_id, message_id) %>%
+  summarize(totalC = sum(C, na.rm = TRUE)) %>%
+  arrange(-totalC) %>%
+  head(10)
+
+log_str <- c(log_str,paste(nrow(summary_df),"after filtering"))
+
+summary_df <- summary_df %>%
+  arrange(channel_id, message_id, TS) %>%
+  group_by(channel_id, message_id) %>%
+  mutate(
+    time_t = 2 * as.numeric(difftime(posted, anal_start, units = "hours")) ,
+    time_s = 2 * as.numeric(difftime(TS, anal_start, units = "hours")) 
+    # !!!! times ar in half hours!
+  ) %>%
+  ungroup() %>%
+  select(channel_id,message_id, TS, posted, C, time_t,time_s)
+
+
+print("This is temporary fix of probable time shift!")
+
+summary_df <- summary_df %>%
+  mutate(
+    time_s = time_s-2
+    # !!!! times ar in half hours!
+  ) 
+  
+  
+  
+# Load summary_df
+# summary_df should have: message_id, time_t, time_s, C
+
+# Step 1: Compute I_{m,\sigma}
+summary_df <- summary_df %>%
+  arrange(channel_id,message_id, time_s) %>%
+  group_by(channel_id, message_id) %>%
+  mutate(
+    I_m_sigma = ifelse(time_t <= time_s, floor(time_s - time_t), -Inf)
+  ) %>%
+  ungroup()
+
+summary_df <- summary_df %>%
+  group_by(channel_id, message_id) %>%
+  complete(I_m_sigma = full_seq(c(0, max(I_m_sigma, na.rm = TRUE)), 1), fill = list(
+    C = 0
+  )) %>%
+  ungroup()
+
+
+summary_df <- summary_df %>%
+  group_by(channel_id, message_id) %>%
+  mutate( 
+    time_s = ifelse(is.na(time_s), last(time_s) - last(I_m_sigma) + I_m_sigma, time_s)
+  ) %>%
+  fill(time_t, .direction = "downup") %>%
+  ungroup()
+
+
+
+# Step 2: Compute tau and varsigma
+summary_df <- summary_df %>%
+  group_by(channel_id, message_id) %>%
+  mutate(
+    tau_m_sigma = time_s - pmax(time_t + I_m_sigma, lag(time_s, default = first(time_t))),
+    varsigma_m_sigma = pmax(lag(time_s, default = first(time_t)), time_t + I_m_sigma) - lag(time_s, default = first(time_t))
+  ) %>%
+  ungroup()
+
+
+# Step 3: Compute J_sigma (hour-based time effect)
+summary_df <- summary_df %>%
+  mutate(
+    J_sigma =  (((round(time_s)) %/% (48 / nseasonal)) %% nseasonal) + 1  # To match indexing in R (1-based)
+  )
+
+# Step 4: Define Poisson intensity function
+
+# Step 6: Optimize parameters using MLE
+
+
+summary_df <- summary_df %>% filter(I_m_sigma != -Inf & I_m_sigma <= A)
+
+summary_df <- summary_df %>%
+  group_by(channel_id, message_id) %>%
+  # Remove messages where the sum of C is zero
+  # Calculate frequency as the ratio of C to the sum of C in the message
+  filter(sum(C) > 0) %>%
+  mutate(p = C / sum(C)) %>%
+  ungroup()
+
+summary_df <- summary_df %>%
+  mutate(message_index = dense_rank(message_id))
+
+
+# --- Assume that summary_df is already built as in the question ---
+# For clarity, here is a reminder of the relevant columns in summary_df:
+#   message_id, time_t, time_s, C, I_m_sigma, tau_m_sigma, varsigma_m_sigma, J_sigma, p
+
+# --- Step 0. Compute the previous seasonal index for each message ---
+# --- Load necessary libraries ---
+
+# --- Assume that summary_df is already prepared as in your provided code ---
+# Relevant columns in summary_df include:
+#   channel_id, message_id, I_m_sigma, tau_m_sigma, varsigma_m_sigma, J_sigma, p
+# We also assume that a column J_prev (the previous seasonal index) has been computed:
+summary_df <- summary_df %>%
+  group_by(channel_id, message_id) %>%
+  mutate(J_prev = lag(J_sigma, default = first(J_sigma))) %>% 
+  ungroup()
+
+write.csv(summary_df,paste0(output_folder,islandid,"_emotimes_regression.csv"))
+
+# --- Model settings ---
+# We will fix the first seasonal coefficient (for season 1) to 1,
+# and estimate the remaining nseasonal-1 coefficients.
+
+# --- Extract needed vectors from summary_df ---
+I    <- summary_df$I_m_sigma           # integer lag indicator (I)
+tau  <- summary_df$tau_m_sigma         # tau_m_sigma
+vars <- summary_df$varsigma_m_sigma     # varsigma_m_sigma (we name it "vars")
+J    <- summary_df$J_sigma              # seasonal index for current observation
+Jprev<- summary_df$J_prev              # seasonal index for the previous measurement
+y    <- summary_df$p                   # observed p (the ratio of counts)
+
+# --- Define the model prediction function ---
+# The new parameter vector "par" is organized as:
+#    par[1:(A+1)] are alpha0, alpha1, ..., alpha_A,
+#    par[(A+2):(A+1 + (nseasonal-1))] are the seasonal parameters for indices 2,...,nseasonal.
+# The seasonal parameter for index 1 is fixed to 1.
+model_pred <- function(par, I, tau, vars, J, Jprev, A, nseasonal) {
+  # Extract alpha parameters (alpha0,...,alpha_A)
+  alpha <- par[1:(A+1)]
+  # Build seasonal coefficients: fixed 1 for the first season, then estimated values for seasons 2:nseasonal.
+  eta_est <- c(1, par[(A+2):(A+1+nseasonal-1)])
+  
+  # Initialize prediction vector
+  pred <- numeric(length(I))
+  
+  # For observations with I == 0:
+  #   p = tau * eta[J] * alpha0   (with alpha0 = alpha[1])
+  ind0 <- which(I == 0)
+  pred[ind0] <- tau[ind0] * eta_est[J[ind0]] * alpha[1]
+  
+  # For observations with I > 0:
+  #   p = tau * eta[J] * alpha_{I}  +  vars * eta[J_prev] * alpha_{I-1}
+  # Note: Since alpha is stored with alpha0 at index 1, for I = i > 0 we use:
+  #    alpha[i+1] for alpha_i   and  alpha[i] for alpha_{i-1}.
+  indpos <- which(I > 0)
+  pred[indpos] <- tau[indpos] * eta_est[J[indpos]] * alpha[I[indpos] + 1] +
+    vars[indpos] * eta_est[Jprev[indpos]] * alpha[I[indpos]]
+  
+  pred
+}
+
+# --- Define an objective function: sum of squared errors ---
+obj_fun <- function(par) {
+  pred <- model_pred(par, I, tau, vars, J, Jprev, A, nseasonal)
+  sum((y - pred)^2)
+}
+
+# --- Choose initial guesses ---
+# For the alpha parameters (length A+1) we choose a small positive number.
+init_alpha <- rep(0.1, A+1)
+# For the seasonal parameters for seasons 2 to nseasonal (length nseasonal-1) we choose 0.1.
+init_eta   <- rep(0.1, nseasonal - 1)
+init_par   <- c(init_alpha, init_eta)
+
+# --- Optimize ---
+# We use "L-BFGS-B" with lower bounds to enforce positivity.
+fit <- optim(par = init_par, fn = obj_fun, method = "L-BFGS-B", 
+             lower = rep(1e-8, length(init_par)), hessian = TRUE)
+
+# --- Extract the estimated parameters ---
+alpha_est <- fit$par[1:(A+1)]
+eta_estimated <- c(1, fit$par[(A+2):(A+1+nseasonal-1)])  # Prepend the fixed value
+
+# --- Report the results ---
+cat("Alpha estimates (alpha0, alpha1, ..., alpha_A):\n")
+print(alpha_est)
+cat("\nSeasonal estimates (eta1 fixed to 1, then eta2,...,eta_nseasonal):\n")
+print(eta_estimated)
+
+# Extract Hessian matrix from optimization output
+hessian_matrix <- fit$hessian
+
+# Compute variance-covariance matrix (inverse of Hessian)
+vcov_matrix <- solve(hessian_matrix)
+
+# Compute standard errors (square root of diagonal elements)
+standard_errors <- sqrt(diag(vcov_matrix))
+
+# Compute 95% confidence intervals
+z_critical <- qnorm(0.975) # Approx. 1.96 for 95% CI
+
+ci_lower <- fit$par - z_critical * standard_errors
+ci_upper <- fit$par + z_critical * standard_errors
+
+if (is.null(names(fit$par))) {
+  names(fit$par) <- paste0("par", seq_along(fit$par))
+}
+# Combine results into a dataframe
+ci_df <- data.frame(
+  Parameter = names(fit$par),
+  Estimate = fit$par,
+  SE = standard_errors,
+  Lower95 = ci_lower,
+  Upper95 = ci_upper
+)
+
+print(ci_df)
+
+
+
+# Extract alpha estimates and CIs
+alpha_df <- ci_df[1:(A+1), ]  # Assuming first (A+1) elements are alphas
+
+
+# Extract eta estimates and CIs
+eta_df <- ci_df[(A+2):(A+1+nseasonal-1), ]  # Eta parameters
+
+
+
+# Open a PDF device
+# pdf(paste0(output_folder,islandid,"_emotime_parameters.pdf"), width = 8, height = 6)
+
+# Plot 1: Confidence Intervals for Alpha Parameters
+ggplot(alpha_df, aes(x = Parameter, y = Estimate)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = Lower95, ymax = Upper95), width = 0.2) +
+  labs(title = "Confidence Intervals for Alpha Estimates",
+       x = "Alpha Parameters", y = "Estimate") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 2: Confidence Intervals for Eta Parameters
+ggplot(eta_df, aes(x = Parameter, y = Estimate)) +
+  geom_point(size = 3, color = "blue") +
+  geom_errorbar(aes(ymin = Lower95, ymax = Upper95), width = 0.2, color = "blue") +
+  labs(title = "Confidence Intervals for Eta Estimates",
+       x = "Eta Parameters", y = "Estimate") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Close the PDF device
+# dev.off()
+
+print(log_str)
+
+library(ggplot2)
+
+# Ensure top_messages is available and merged with summary_df
+plot_data <- summary_df %>%
+  inner_join(top_msgs, by = c("channel_id", "message_id"))
+
+# Create faceted plot
+ggplot(plot_data, aes(x = I_m_sigma, y = p)) +
+  geom_line() +  # Line plot (can change to geom_point() if needed)
+  facet_wrap(~ channel_id + message_id, scales = "free") +  # Facet by (channel_id, message_id)
+  theme_minimal() +
+  labs(title = "Reaction Patterns per Message",
+       x = "I_m_sigma",
+       y = "p (Frequency of Reaction)")
+
+
+dbDisconnect(con)
+```

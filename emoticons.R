@@ -78,7 +78,7 @@ list_messages <- function(username, column, desc) {
   )
   
   # Write HTML to file
-  output_file <- file.path(output_folder, paste0(username, "_msgs_by_", idstr, ".html"))
+  output_file <- file.path(output_folder, paste0(islandid, "_", username, "_msgs_by_", idstr, ".html"))
   writeLines(html_content, output_file)  
   
 
@@ -102,7 +102,7 @@ top_emoticons <- init_emos(con)
 
 catalogue_data <- get_catalogue(con,islandcondition)
 
-top_channels <- get_top_channels(con, catalogue_data)
+top_channels <- get_top_channels(con, catalogue_data,10)
 
 
 # Add required library for table rendering
@@ -193,7 +193,7 @@ for (i in 1:nrow(top_channels)) {
       ungroup()
     
     # Save summarized data to CSV
-    write.csv(reaction_summary, paste0(output_folder, username, "_reaction_summary.csv"), row.names = FALSE)
+    write.csv(reaction_summary, paste0(output_folder, islandid, "_",username, "_reaction_summary.csv"), row.names = FALSE)
     
     # Generate histogram plot
     reaction_totals <- colSums(reaction_summary[-1])
@@ -206,7 +206,7 @@ for (i in 1:nrow(top_channels)) {
     reaction_totals_df$Reaction_UTF8 <- hex_to_text(reaction_totals_df$Reaction)
     
     # Create plot
-    png_file <- paste0(output_folder, username , "_hist.png")
+    png_file <- paste0(output_folder,islandid, "_", username , "_hist.png")
     png(file = png_file)
     reaction_totals_df <- reaction_totals_df %>%
       mutate(Reaction_UTF8 = factor(Reaction_UTF8, levels = Reaction_UTF8))
@@ -269,7 +269,7 @@ for (i in 1:nrow(top_channels)) {
     catalogue_table <- tableGrob(extended_data, rows = NULL, theme = ttheme_default())
     
     
-    pdf(file = paste0(output_folder, username, "_info.pdf"), width = 8, height = 10)
+    pdf(file = paste0(output_folder,islandid, "_", username, "_info.pdf"), width = 8, height = 10)
     
     # Ensure the graphics device is active
     grid.newpage()
@@ -294,7 +294,7 @@ for (i in 1:nrow(top_channels)) {
   #  catalogue_table <- tableGrob(extended_data, rows = NULL, theme = ttheme_default())
     
   
-    pdf(file = paste0(output_folder, username, "_info.pdf"), width = 8, height = 10)
+    pdf(file = paste0(output_folder, islandid, "_",username, "_info.pdf"), width = 8, height = 10)
     grid.newpage()
     
     # Add plot
@@ -355,7 +355,7 @@ for (i in 1:nrow(top_channels)) {
   }  
 }
 
-write.csv(global_catalogue_table, file.path(output_folder, "global_catalogue_table_wide.csv"), row.names = FALSE)
+write.csv(global_catalogue_table, file.path(output_folder, islandid, "_global_catalogue_table_wide.csv"), row.names = FALSE)
 
 
 dbDisconnect(con)

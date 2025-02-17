@@ -16,9 +16,7 @@ catalogue_data <- get_catalogue(con,islandcondition)
 
 messages_data <-  dbGetQuery(con,"SELECT channel_id, src_channel_id FROM messages" )
 
-top_channels <- get_top_channels(con, catalogue_data)
-
-
+top_channels <- get_top_channels(con, catalogue_data, 20)
 
 # Step 1: Filter messages_data for interactions between top_channels
 top_channel_ids <- top_channels$channel_id
@@ -86,15 +84,22 @@ ggsave(output_path, plot = plot, width = 10, height = 8, dpi = 300)
 # relative graph
 # Ensure that the necessary libraries are loaded
 
+
+
 # Step 1: Create interaction_data_rel with the calculated column
 interaction_data_rel <- interaction_data_base %>%
   mutate(percent_received = n / dest_msg_count) %>%
   select(src_username, dest_username, percent_received) %>%
   mutate(percent_received = if_else(percent_received < 0.001, 0, percent_received))
 
+
+
 # Step 2: Transform interaction_data_rel into a matrix
+
 interaction_matrix_rel <- interaction_data_rel %>%
   pivot_wider(names_from = dest_username, values_from = percent_received, values_fill = list(percent_received = 0)) %>%
+  rename_with(~ str_trunc(., 11, ellipsis = "..."), -src_username) %>%  # Shorten column names (excluding src_username)
+  mutate(src_username = str_trunc(src_username, 11, ellipsis = "...")) %>%  # Shorten row names
   column_to_rownames(var = "src_username") %>%
   as.matrix()
 
@@ -125,7 +130,7 @@ plot_rel <- ggraph(interaction_graph_rel, layout = "fr") +
                  arrow = arrow(length = unit(3, 'mm')), # Define arrow size for visibility
                  end_cap = circle(3, 'mm')) + # Adjust end cap for clarity
   geom_node_point(size = 5) +
-  geom_node_text(aes(label = name), repel = TRUE, size = 6) + # Increase label size to 6
+  geom_node_text(aes(label = name), repel = TRUE, size = 8) + # Increase label size to 6
   theme_void()  # Step 5: Save the plot as PNG
 
 output_path_rel <- file.path(output_folder, paste0(islandid,"_interaction_graph_rel.png"))
