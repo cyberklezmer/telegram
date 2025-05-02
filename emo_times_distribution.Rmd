@@ -5,343 +5,346 @@ params:
   rmd_par_island: 'ALL'
   threshold: 20  # ninimal number of reactions to be included in istimation
   num_channels: 20
+  t_limit: 12
 
 
 ---
 
-```{r setup}
-
-# numbef of daily seasonal coefs
-nseasonal <- 12
-
-# number of half - our bins to examine
-A <- 12
-
-anal_start_str <- "2025-01-30 00:00:00"
-anal_start <- as.POSIXct(anal_start_str)
-last_message_str <- "2025-02-15 10:00:00"
-last_messages<- as.POSIXct(last_message_str)
-anal_end <- as.POSIXct("2025-02-16 10:00:00")
+```{r setup, echo=FALSE, message=FALSE}
 
 source("defs.R")
 
 
 library(lubridate)
 library(purrr)
-con <- connect_db()
-
-top_emoticons <- init_emos(con)
-
+library(ggplot2)
+library(MASS)
 
 
-dbDisconnect(con)
+# must start at 0:0:0 !!!
+anal_start_str <- "2025-02-22 00:00:00"
+anal_start <- as.POSIXct(anal_start_str)
+
+anal_end_str <- "2025-03-28 23:59:59"
+anal_end <- as.POSIXct(anal_end_str)
+
+last_message_str <- anal_end_str
+last_messages<- as.POSIXct(last_message_str)
+
+# take care, hole in data from 26.3 - 4.4.  !!!
+
+# 0 nzst be first, 
+cs <- c(0,0.125,0.25,0.5,1,2,4,8,params$t_limit)
 
 ```
 
 
-```{r whole code}
-
-log_str <- c("")  # One-column log
-
-
+```{r data, echo=FALSE, message=FALSE}
 
 con <- connect_db()
 
-reaction_data <- dbGetQuery(con, "SELECT RH.channel_id,  RH.message_id, HEX(RH.reaction_emo) as emo, count, RH.TS,
-                              posted from reactions_history RH INNER JOIN messages M 
-                            ON(RH.channel_id = M.channel_id AND RH.message_id = M.msg_id 
-                            ) 
-#                            WHERE  RH.message_id = 31430
-                            ")
+reaction_data <- dbGetQuery(
+  con,
+  sprintf(
+    "SELECT RH.channel_id, RH.message_id, count, RH.TS, posted
+     FROM reactions_history RH
+     INNER JOIN messages M 
+     ON RH.channel_id = M.channel_id AND RH.message_id = M.msg_id
+     WHERE RH.reaction_emo = 'VIEWS'
+     AND posted > '%s'
+     AND posted < '%s'
+     AND TS <= '%s'
+#     AND RH.message_id = 7621
+    ",
+    anal_start_str, last_message_str, anal_end_str
+  )
+)
+
+dbDisconnect(con)
 
 
 reaction_data <- reaction_data %>%
-  filter(posted > anal_start & posted < last_messages & TS >= anal_start)
-
-
+  arrange(channel_id, message_id, TS) %>%
+  group_by(channel_id, message_id) %>%
+  mutate(delta_count = count - lag(count, default = 0),
+         last_TS = lag(TS))  %>% 
+  ungroup()
 
 reaction_data <- reaction_data %>%
-  arrange(channel_id, message_id, emo, TS) %>%
-  group_by(channel_id, message_id, emo) %>%
-  mutate(delta_count = count - lag(count, default = 0))  %>% 
-  ungroup()
-
-summary_df <- reaction_data %>%
-  group_by(channel_id, message_id, TS, posted) %>%
-  summarize(C = sum(delta_count, na.rm = TRUE), .groups = "drop")
-
-log_str <- c(log_str,paste(nrow(summary_df),"before filtering"))
-
-# Filter out messages where sum of C is less than threshold
-summary_df <- summary_df %>%
-  group_by(channel_id, message_id) %>%
-  filter(sum(C, na.rm = TRUE) >= params$threshold) %>%
-  ungroup()
-
-top_msgs <-  summary_df %>%
-  group_by(channel_id, message_id) %>%
-  summarize(totalC = sum(C, na.rm = TRUE)) %>%
-  arrange(-totalC) %>%
-  head(10)
-
-log_str <- c(log_str,paste(nrow(summary_df),"after filtering"))
-
-summary_df <- summary_df %>%
   arrange(channel_id, message_id, TS) %>%
   group_by(channel_id, message_id) %>%
   mutate(
-    time_t = 2 * as.numeric(difftime(posted, anal_start, units = "hours")) ,
-    time_s = 2 * as.numeric(difftime(TS, anal_start, units = "hours")) 
-    # !!!! times ar in half hours!
+    posted_local = with_tz(force_tz(as.POSIXct(posted, tz = "GMT"), "GMT"), "Europe/Prague"),
+    time_posted = as.numeric(difftime(as.POSIXct(posted_local), anal_start, units = "hours")) ,
+    time_ts = as.numeric(difftime(as.POSIXct(TS), anal_start, units = "hours")))%>%
+  mutate(
+    time_last_ts = ifelse(is.na(last_TS),time_posted, as.numeric(difftime(as.POSIXct(last_TS), anal_start, units = "hours"))),
+#    daytime = format(as.POSIXct(posted_local), "%H:%M:%S"),  # Extract time of day
+    daytime_ts = format(as.POSIXct(TS), "%H:%M:%S"),
+    daytime_last_ts = format(as.POSIXct(last_TS), "%H:%M:%S")
   ) %>%
+  mutate(
+    hour_of_day = hour(hms(daytime_ts)) +
+                  minute(hms(daytime_ts)) / 60 +
+                  second(hms(daytime_ts)) / 3600,
+    last_hour_of_day = hour(hms(daytime_last_ts)) +
+                  minute(hms(daytime_last_ts)) / 60 +
+                  second(hms(daytime_last_ts)) / 3600
+
+  )  %>%
   ungroup() %>%
-  select(channel_id,message_id, TS, posted, C, time_t,time_s)
+    dplyr::select(channel_id,message_id, delta_count, posted,TS,time_posted,time_ts, time_last_ts, hour_of_day)
+
+```
+
+```{r seasonality, echo=FALSE, message=FALSE}
+library(splines)
 
 
-print("This is temporary fix of probable time shift!")
+# --- Piece-wise linear model ---
+seasonal_data <- reaction_data %>% 
+   mutate(hour_bin = cut(hour_of_day, breaks = 0:24, right = FALSE, include.lowest = TRUE)) %>%
+  filter(time_ts - time_last_ts < 1)
 
-summary_df <- summary_df %>%
-  mutate(
-    time_s = time_s-2
-    # !!!! times ar in half hours!
-  ) 
-  
-  
-  
-# Load summary_df
-# summary_df should have: message_id, time_t, time_s, C
+seasonal_model <- lm(delta_count ~ hour_bin, data = seasonal_data)
 
-# Step 1: Compute I_{m,\sigma}
-summary_df <- summary_df %>%
-  arrange(channel_id,message_id, time_s) %>%
-  group_by(channel_id, message_id) %>%
-  mutate(
-    I_m_sigma = ifelse(time_t <= time_s, floor(time_s - time_t), -Inf)
-  ) %>%
-  ungroup()
+# Generate prediction data and intervals
 
-summary_df <- summary_df %>%
-  group_by(channel_id, message_id) %>%
-  complete(I_m_sigma = full_seq(c(0, max(I_m_sigma, na.rm = TRUE)), 1), fill = list(
-    C = 0
-  )) %>%
-  ungroup()
-
-
-summary_df <- summary_df %>%
-  group_by(channel_id, message_id) %>%
-  mutate( 
-    time_s = ifelse(is.na(time_s), last(time_s) - last(I_m_sigma) + I_m_sigma, time_s)
-  ) %>%
-  fill(time_t, .direction = "downup") %>%
-  ungroup()
-
-
-
-# Step 2: Compute tau and varsigma
-summary_df <- summary_df %>%
-  group_by(channel_id, message_id) %>%
-  mutate(
-    tau_m_sigma = time_s - pmax(time_t + I_m_sigma, lag(time_s, default = first(time_t))),
-    varsigma_m_sigma = pmax(lag(time_s, default = first(time_t)), time_t + I_m_sigma) - lag(time_s, default = first(time_t))
-  ) %>%
-  ungroup()
-
-
-# Step 3: Compute J_sigma (hour-based time effect)
-summary_df <- summary_df %>%
-  mutate(
-    J_sigma =  (((round(time_s)) %/% (48 / nseasonal)) %% nseasonal) + 1  # To match indexing in R (1-based)
+# Extract hourly coefficients from the fitted model (run ONCE)
+# Extract fitted hourly step values and their SEs
+get_hourly_levels <- function(model) {
+  # Define hour bins (0–23, midpoint for safety)
+  hour_seq <- 0:23 + 0.5
+  hour_df <- data.frame(
+    hour_of_day = hour_seq,
+    hour_bin = cut(hour_seq, breaks = 0:24, right = FALSE, include.lowest = TRUE)
   )
 
-# Step 4: Define Poisson intensity function
+  # Predict with standard errors
+  pred <- predict(model, newdata = hour_df, se.fit = TRUE)
 
-# Step 6: Optimize parameters using MLE
+  # Prepare named vectors
+  values <- setNames(pred$fit, levels(hour_df$hour_bin))
+  ses    <- setNames(pred$se.fit, levels(hour_df$hour_bin))
 
-
-summary_df <- summary_df %>% filter(I_m_sigma != -Inf & I_m_sigma <= A)
-
-summary_df <- summary_df %>%
-  group_by(channel_id, message_id) %>%
-  # Remove messages where the sum of C is zero
-  # Calculate frequency as the ratio of C to the sum of C in the message
-  filter(sum(C) > 0) %>%
-  mutate(p = C / sum(C)) %>%
-  ungroup()
-
-summary_df <- summary_df %>%
-  mutate(message_index = dense_rank(message_id))
-
-
-# --- Assume that summary_df is already built as in the question ---
-# For clarity, here is a reminder of the relevant columns in summary_df:
-#   message_id, time_t, time_s, C, I_m_sigma, tau_m_sigma, varsigma_m_sigma, J_sigma, p
-
-# --- Step 0. Compute the previous seasonal index for each message ---
-# --- Load necessary libraries ---
-
-# --- Assume that summary_df is already prepared as in your provided code ---
-# Relevant columns in summary_df include:
-#   channel_id, message_id, I_m_sigma, tau_m_sigma, varsigma_m_sigma, J_sigma, p
-# We also assume that a column J_prev (the previous seasonal index) has been computed:
-summary_df <- summary_df %>%
-  group_by(channel_id, message_id) %>%
-  mutate(J_prev = lag(J_sigma, default = first(J_sigma))) %>% 
-  ungroup()
-
-write.csv(summary_df,paste0(output_folder,islandid,"_emotimes_regression.csv"))
-
-# --- Model settings ---
-# We will fix the first seasonal coefficient (for season 1) to 1,
-# and estimate the remaining nseasonal-1 coefficients.
-
-# --- Extract needed vectors from summary_df ---
-I    <- summary_df$I_m_sigma           # integer lag indicator (I)
-tau  <- summary_df$tau_m_sigma         # tau_m_sigma
-vars <- summary_df$varsigma_m_sigma     # varsigma_m_sigma (we name it "vars")
-J    <- summary_df$J_sigma              # seasonal index for current observation
-Jprev<- summary_df$J_prev              # seasonal index for the previous measurement
-y    <- summary_df$p                   # observed p (the ratio of counts)
-
-# --- Define the model prediction function ---
-# The new parameter vector "par" is organized as:
-#    par[1:(A+1)] are alpha0, alpha1, ..., alpha_A,
-#    par[(A+2):(A+1 + (nseasonal-1))] are the seasonal parameters for indices 2,...,nseasonal.
-# The seasonal parameter for index 1 is fixed to 1.
-model_pred <- function(par, I, tau, vars, J, Jprev, A, nseasonal) {
-  # Extract alpha parameters (alpha0,...,alpha_A)
-  alpha <- par[1:(A+1)]
-  # Build seasonal coefficients: fixed 1 for the first season, then estimated values for seasons 2:nseasonal.
-  eta_est <- c(1, par[(A+2):(A+1+nseasonal-1)])
-  
-  # Initialize prediction vector
-  pred <- numeric(length(I))
-  
-  # For observations with I == 0:
-  #   p = tau * eta[J] * alpha0   (with alpha0 = alpha[1])
-  ind0 <- which(I == 0)
-  pred[ind0] <- tau[ind0] * eta_est[J[ind0]] * alpha[1]
-  
-  # For observations with I > 0:
-  #   p = tau * eta[J] * alpha_{I}  +  vars * eta[J_prev] * alpha_{I-1}
-  # Note: Since alpha is stored with alpha0 at index 1, for I = i > 0 we use:
-  #    alpha[i+1] for alpha_i   and  alpha[i] for alpha_{i-1}.
-  indpos <- which(I > 0)
-  pred[indpos] <- tau[indpos] * eta_est[J[indpos]] * alpha[I[indpos] + 1] +
-    vars[indpos] * eta_est[Jprev[indpos]] * alpha[I[indpos]]
-  
-  pred
+  list(values = values, se = ses)
 }
 
-# --- Define an objective function: sum of squared errors ---
-obj_fun <- function(par) {
-  pred <- model_pred(par, I, tau, vars, J, Jprev, A, nseasonal)
-  sum((y - pred)^2)
+
+hourly_result <- get_hourly_levels(seasonal_model)
+
+# Access components
+
+
+norm_c <- 1 /sum(hourly_result$values) * length(hourly_result$values)
+
+hourly_result$values <- hourly_result$values * norm_c
+hourly_result$se <-hourly_result$se * norm_c
+
+
+
+
+hourly_values <- hourly_result$values
+hourly_ses    <- hourly_result$se
+
+# Build data frame for plotting
+hour_df <- data.frame(
+  hour = 0:23,
+  estimate = as.numeric(hourly_values),
+  se = as.numeric(hourly_ses)
+) %>%
+  mutate(
+    ci_lower = estimate - 1.96 * se,
+    ci_upper = estimate + 1.96 * se
+  )
+
+print(hour_df)
+
+# Bar plot with error bars
+ggplot(hour_df, aes(x = factor(hour), y = estimate)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.3) +
+  labs(
+    title = "Hourly Seasonality Pattern with 95% CI",
+    x = "Hour of Day",
+    y = "Estimated delta_count"
+  ) +
+  theme_minimal()
+
+
+```
+
+```{r view distribution, echo=FALSE, message=FALSE }
+
+library(dplyr)
+library(pracma)  # For trapezoidal integration
+
+area_under_seasonality <- function(s, t, hourly_values) {
+    stopifnot(is.numeric(s), is.numeric(t), s <= 24 , s >= 0, t <= 24, t >= 0)
+   if(s == t)
+   {
+     return(0)
+   }
+     if(s >= t)
+   {
+     return(area_under_seasonality(0, t, hourly_values)+area_under_seasonality(s,24, hourly_values))
+   }
+  
+
+  # Define helper to get bin index (0-based hour)
+  hour_bins <- 0:23
+  get_bin <- function(x) floor(x)  # e.g., 8.5 → 8
+
+  # Initialize
+  total_area <- 0
+
+  # Current position
+  x <- s
+  while (x < t) {
+    bin <- get_bin(x)
+    next_edge <- min(t, bin + 1)
+    width <- next_edge - x
+    level <- hourly_values[bin + 1]  # +1 for 1-based index
+    total_area <- total_area + level * width
+    x <- next_edge
+  }
+
+  return(total_area)
 }
 
-# --- Choose initial guesses ---
-# For the alpha parameters (length A+1) we choose a small positive number.
-init_alpha <- rep(0.1, A+1)
-# For the seasonal parameters for seasons 2 to nseasonal (length nseasonal-1) we choose 0.1.
-init_eta   <- rep(0.1, nseasonal - 1)
-init_par   <- c(init_alpha, init_eta)
+# area_under_seasonality(3,3,hourly_values)
 
-# --- Optimize ---
-# We use "L-BFGS-B" with lower bounds to enforce positivity.
-fit <- optim(par = init_par, fn = obj_fun, method = "L-BFGS-B", 
-             lower = rep(1e-8, length(init_par)), hessian = TRUE)
 
-# --- Extract the estimated parameters ---
-alpha_est <- fit$par[1:(A+1)]
-eta_estimated <- c(1, fit$par[(A+2):(A+1+nseasonal-1)])  # Prepend the fixed value
-
-# --- Report the results ---
-cat("Alpha estimates (alpha0, alpha1, ..., alpha_A):\n")
-print(alpha_est)
-cat("\nSeasonal estimates (eta1 fixed to 1, then eta2,...,eta_nseasonal):\n")
-print(eta_estimated)
-
-# Extract Hessian matrix from optimization output
-hessian_matrix <- fit$hessian
-
-# Compute variance-covariance matrix (inverse of Hessian)
-vcov_matrix <- solve(hessian_matrix)
-
-# Compute standard errors (square root of diagonal elements)
-standard_errors <- sqrt(diag(vcov_matrix))
-
-# Compute 95% confidence intervals
-z_critical <- qnorm(0.975) # Approx. 1.96 for 95% CI
-
-ci_lower <- fit$par - z_critical * standard_errors
-ci_upper <- fit$par + z_critical * standard_errors
-
-if (is.null(names(fit$par))) {
-  names(fit$par) <- paste0("par", seq_along(fit$par))
+# Compute overlaps properly
+compute_overlap <- function(lts, ts, posted, cs) {
+  stopifnot(ts-lts < 24, ts >= lts, ts >= posted, lts >= posted)
+  overlap_vec <- numeric(k)  # initialize empty vector of length k
+  
+  for (i in seq_len(k)) {
+    lower <- posted + max(cs[i], lts-posted)
+    upper <- posted + min(cs[i + 1], ts-posted)
+    overlap_vec[i] <- ifelse(lower >= upper,0,   area_under_seasonality(lower %% 24.0,upper %% 24.0 ,hourly_result$values))
+#                             upper-lower)
+  }
+  overlap_vec
+  return(overlap_vec)
 }
-# Combine results into a dataframe
-ci_df <- data.frame(
-  Parameter = names(fit$par),
-  Estimate = fit$par,
-  SE = standard_errors,
-  Lower95 = ci_lower,
-  Upper95 = ci_upper
+
+# compute_overlap(0.5,0.7,0.3,cs)
+
+regr_data <- reaction_data  %>%
+  mutate( Y = delta_count) %>%
+  filter( time_ts - time_posted < params$t_limit )  %>%
+  dplyr::select(Y,time_ts,time_last_ts,time_posted)
+
+
+k <- length(cs) - 1
+
+
+# Apply to each row of regr_data
+X <- do.call(
+  rbind,
+  lapply(seq_len(nrow(regr_data)), function(j) {
+    compute_overlap(regr_data$time_last_ts[j], regr_data$time_ts[j],regr_data$time_posted[j] , cs)
+  })
 )
 
-print(ci_df)
+# Check rank of X
+X_matrix <- as.matrix(X)
+rank_X <- qr(X_matrix)$rank
+ncol_X <- ncol(X_matrix)
+
+# Print status
+cat("Rank of X:", rank_X, " | Number of columns:", ncol_X, "\n")
+
+# Warn if singular
+if (rank_X < ncol_X) {
+  stop("Design matrix X is singular (columns are linearly dependent).")
+}
 
 
+# Check X
+X <- as.data.frame(X)
+colnames(X) <- paste0("alpha_", seq_len(k))
 
-# Extract alpha estimates and CIs
-alpha_df <- ci_df[1:(A+1), ]  # Assuming first (A+1) elements are alphas
-
-
-# Extract eta estimates and CIs
-eta_df <- ci_df[(A+2):(A+1+nseasonal-1), ]  # Eta parameters
-
+# Merge X with Y
+model_data <- bind_cols(regr_data, X)
 
 
-# Open a PDF device
-# pdf(paste0(output_folder,islandid,"_emotime_parameters.pdf"), width = 8, height = 6)
+library(purrr)
 
-# Plot 1: Confidence Intervals for Alpha Parameters
-ggplot(alpha_df, aes(x = Parameter, y = Estimate)) +
-  geom_point(size = 3) +
-  geom_errorbar(aes(ymin = Lower95, ymax = Upper95), width = 0.2) +
-  labs(title = "Confidence Intervals for Alpha Estimates",
-       x = "Alpha Parameters", y = "Estimate") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# Get names of covariates (columns starting with "alpha_")
+alpha_vars <- grep("^alpha_", names(model_data), value = TRUE)
 
-# Plot 2: Confidence Intervals for Eta Parameters
-ggplot(eta_df, aes(x = Parameter, y = Estimate)) +
-  geom_point(size = 3, color = "blue") +
-  geom_errorbar(aes(ymin = Lower95, ymax = Upper95), width = 0.2, color = "blue") +
-  labs(title = "Confidence Intervals for Eta Estimates",
-       x = "Eta Parameters", y = "Estimate") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# Check if any row has Y > 0 and all alpha_ variables equal to zero
+n_rows_ypos_zero_alpha <- model_data %>%
+  filter(Y > 0) %>%
+  filter(if_all(all_of(alpha_vars), ~ .x == 0)) %>%
+  nrow()
 
-# Close the PDF device
-# dev.off()
+if(n_rows_ypos_zero_alpha > 0)
+{
+  stop("Number of rows with Y > 0 and all alpha_* == 0:", n_rows_ypos_zero_alpha, "\n")
+}
 
-print(log_str)
+# Count for each alpha_* variable the number of rows where it is non-zero
+nonzero_counts <- model_data %>%
+  summarise(across(all_of(alpha_vars), ~ sum(. != 0)))
 
+
+print(nonzero_counts)
+
+
+ols_model <- lm(Y ~ .  - time_ts - time_last_ts - time_posted  + 0, data = model_data)
+summary(ols_model)
+
+library(broom)
 library(ggplot2)
+library(dplyr)
 
-# Ensure top_messages is available and merged with summary_df
-plot_data <- summary_df %>%
-  inner_join(top_msgs, by = c("channel_id", "message_id"))
+residuals <- resid(ols_model)
+fitted_vals <- fitted(ols_model)
 
-# Create faceted plot
-ggplot(plot_data, aes(x = I_m_sigma, y = p)) +
-  geom_line() +  # Line plot (can change to geom_point() if needed)
-  facet_wrap(~ channel_id + message_id, scales = "free") +  # Facet by (channel_id, message_id)
-  theme_minimal() +
-  labs(title = "Reaction Patterns per Message",
-       x = "I_m_sigma",
-       y = "p (Frequency of Reaction)")
+# Calculate weights using the absolute value
+weights <- 1 / (abs(fitted_vals))
+wls_model <- lm(Y ~ . - time_ts - time_last_ts - time_posted+ 0, data = model_data, weights = weights)
+summary(wls_model)
+
+# Step 1: Extract WLS model coefficients and CIs
+coefs_df <- broom::tidy(wls_model, conf.int = TRUE) %>%
+  filter(grepl("^alpha_", term))
+
+# Step 2: Attach x-axis labels cs[2:(k+1)] as categorical variable
+k <- length(cs) - 1
+cs_labels <- cs[2:(k + 1)]
+
+# Format cs labels (optional: round or pretty format)
+cs_labels_formatted <- format(round(cs_labels, 2), nsmall = 2)
+
+# Add labels to coefficients data
+coefs_df <- coefs_df %>%
+  mutate(
+    cs_label = factor(cs_labels_formatted, levels = cs_labels_formatted)
+  )
+
+# Step 3: Plot equidistant bar chart
+ggplot(coefs_df, aes(x = cs_label, y = estimate)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.8) +
+  geom_errorbar(
+    aes(ymin = conf.low, ymax = conf.high),
+    width = 0.2,
+    color = "black"
+  ) +
+  labs(
+    x = "Interval Upper Bound (cs[2] to cs[k+1])",
+    y = "WLS Coefficient Estimate",
+    title = "WLS Estimates for Interval Coefficients"
+  ) +
+  theme_minimal(base_size = 14)
 
 
-dbDisconnect(con)
+
+
+
 ```
+
