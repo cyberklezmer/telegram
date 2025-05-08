@@ -34,7 +34,7 @@ last_messages<- as.POSIXct(last_message_str)
 # take care, hole in data from 26.3 - 4.4.  !!!
 
 # 0 nzst be first, 
-cs <- c(0,0.125,0.25,0.5,1,2,4,8,params$t_limit)
+cs <- c(0,0.0625,0.125,0.25,0.5,1,2,4,8,params$t_limit)
 
 ```
 
@@ -46,33 +46,39 @@ con <- connect_db()
 reaction_data <- dbGetQuery(
   con,
   sprintf(
-    "SELECT RH.channel_id, RH.message_id, count, RH.TS, posted
+    "SELECT CH.username, RH.message_id, count, RH.TS, posted, IF(RH.reaction_emo = 'VIEWS','VIEWS',HEX(RH.reaction_emo)) AS emo, CH.quartile, IF(CH.sources = 'ST', 'T',CH.sources) as sources
      FROM reactions_history RH
      INNER JOIN messages M 
      ON RH.channel_id = M.channel_id AND RH.message_id = M.msg_id
-     WHERE RH.reaction_emo = 'VIEWS'
+     INNER JOIN channels_info CH
+     ON RH.channel_id = CH.channel_id 
+#     WHERE RH.reaction_emo = 'VIEWS'
      AND posted > '%s'
      AND posted < '%s'
      AND TS <= '%s'
-#     AND RH.message_id = 7621
+#     AND RH.message_id = 14220
     ",
     anal_start_str, last_message_str, anal_end_str
   )
 )
 
+# catalogue <- get_catalogue(con)
+
 dbDisconnect(con)
 
+reaction_data <- reaction_data %>%
+  mutate( sq = paste0(sources,quartile))
 
 reaction_data <- reaction_data %>%
-  arrange(channel_id, message_id, TS) %>%
-  group_by(channel_id, message_id) %>%
+  arrange(username, emo, message_id, TS) %>%
+  group_by(username, emo, message_id) %>%
   mutate(delta_count = count - lag(count, default = 0),
          last_TS = lag(TS))  %>% 
   ungroup()
 
 reaction_data <- reaction_data %>%
-  arrange(channel_id, message_id, TS) %>%
-  group_by(channel_id, message_id) %>%
+  arrange(username, message_id, TS) %>%
+  group_by(username, message_id) %>%
   mutate(
     posted_local = with_tz(force_tz(as.POSIXct(posted, tz = "GMT"), "GMT"), "Europe/Prague"),
     time_posted = as.numeric(difftime(as.POSIXct(posted_local), anal_start, units = "hours")) ,
@@ -93,18 +99,433 @@ reaction_data <- reaction_data %>%
 
   )  %>%
   ungroup() %>%
-    dplyr::select(channel_id,message_id, delta_count, posted,TS,time_posted,time_ts, time_last_ts, hour_of_day)
+    dplyr::select(username,sources,quartile,sq,message_id,emo, delta_count, posted,TS,time_posted,time_ts, time_last_ts, hour_of_day)
+
+usernames <- reaction_data |>
+  distinct(username) |>
+  pull(username)
+
+sources <- reaction_data |>
+  distinct(sources) |>
+  pull(sources)
+
+sqs <- reaction_data |>
+  distinct(sq) |>
+  pull(sq)
+
 
 ```
 
+
 ```{r seasonality, echo=FALSE, message=FALSE}
-library(splines)
+
+library(dplyr)
+
+# Function to get and normalize hourly predictions, with consistent factor levels
+get_hourly_levels <- function(model) {
+  hour_seq <- 0:23 + 0.5
+
+  hour_df <- data.frame(
+    hour_of_day = hour_seq,
+    hour_bin = cut(hour_seq, breaks = 0:24, right = FALSE, include.lowest = TRUE)
+  )
+
+  # Restrict levels to only those used in training
+  used_levels <- model$xlevels$hour_bin
+  hour_df$hour_bin <- factor(hour_df$hour_bin, levels = used_levels)
+
+  pred <- predict(model, newdata = hour_df, se.fit = TRUE)
+
+  values <- setNames(pred$fit, used_levels)
+  ses <- setNames(pred$se.fit, used_levels)
+
+  list(values = values, se = ses)
+}
+
+seasonality_pattern <- NULL
+
+compute_seasonality <- function(anal_num, emotic = NULL) {
+ 
+  if(is.null(emotic)) {
+    chart_title <- "Views by hour"
+  } else {
+    chart_title <- paste("Emoticon",emotic,"by hour")
+  }
+    
+  
+  if(anal_num == 0) {
+    names <- c("ALL")
+  } else if( anal_num == 1) {
+    chart_title <- paste(chart_title," by channels")
+    names <- usernames
+  } else if( anal_num == 2) {
+    chart_title <- paste(chart_title," by source and quartile")
+    names <- sqs
+  }  else if( anal_num == 3) {
+    chart_title <- paste(chart_title," by source")
+    names <- sources
+  }
+  # Main loop: create a named list of hour_df-style data frames
+  hourly_by_channel <- setNames(names, names) |>
+    lapply(function(ch_id) {
+      seasonal_data <- reaction_data
+      
+    if(is.null(emotic)) {
+        seasonal_data <-seasonal_data |>
+         filter(emo == "VIEWS")
+    } else {
+        seasonal_data <-seasonal_data |>
+         filter(emo == emotic)
+    } 
+    if(anal_num == 1)
+    {
+      seasonal_data <-seasonal_data |>
+         filter(username == ch_id)
+    }
+    if(anal_num == 2)
+    {
+      seasonal_data <-seasonal_data |>
+         filter(sq == ch_id)
+    }
+
+    if(anal_num == 3)
+    {
+      seasonal_data <-seasonal_data |>
+         filter(sources == ch_id)
+    }
+              
+    seasonal_data  <-seasonal_data |>
+        mutate(hour_bin = cut(hour_of_day, breaks = 0:24, right = FALSE, include.lowest = TRUE)) |>
+        filter(time_ts - time_last_ts < 1)
+  
+      if (nrow(seasonal_data) < 5 || length(unique(seasonal_data$hour_bin)) < 2) {
+        return(NULL)
+      }
+  
+      model <- lm(delta_count ~ hour_bin, data = seasonal_data)
+  
+      res <- get_hourly_levels(model)
+      
+      
+      # normalize only on non-NA estimates
+      norm_c <- 1 / sum(res$values, na.rm = TRUE) * length(res$values)
+      values <- res$values * norm_c
+      ses <- res$se * norm_c
+
+      if(anal_num == 0 & is.null(emotic)) {
+        seasonality_pattern <<- values
+      }
+      
+        
+      data.frame(
+        hour = 0:23,
+        hour_bin = cut(0:23 + 0.5, breaks = 0:24, right = FALSE, include.lowest = TRUE),
+        estimate = as.numeric(values[as.character(cut(0:23 + 0.5, breaks = 0:24, right = FALSE, include.lowest = TRUE))]),
+        se = as.numeric(ses[as.character(cut(0:23 + 0.5, breaks = 0:24, right = FALSE, include.lowest = TRUE))])
+      ) |>
+        mutate(
+          ci_lower = estimate - 1.96 * se,
+          ci_upper = estimate + 1.96 * se
+        )
+    })
+  
+  
+  hourly_long_df <- hourly_by_channel |>
+    discard(is.null) |>
+    imap_dfr(~ mutate(.x, username = .y))
+  
+                                                                                                              
+  p <- ggplot(hourly_long_df, aes(x = factor(hour), y = estimate)) +
+    geom_col(fill = "steelblue", width = 0.9) +
+    geom_errorbar(
+      aes(ymin = ci_lower, ymax = ci_upper),
+      width = 0.25,
+      color = "black"
+    ) +
+    facet_wrap(~ username, scales = "free_y") +
+    labs(
+      title = chart_title,
+      x = "Hour of Day",
+      y = "Normalized Estimate"
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+
+  return(p)
+}
+
+p<- compute_seasonality(0)
+
+p
+
+
+```
+
+
+
+
+```{r seasonality_sensitivity, echo=FALSE, message=FALSE }
+
+p<- compute_seasonality(0,"F09F918D")
+
+p
+
+p<- compute_seasonality(2)
+
+p
+
+
+p<- compute_seasonality(2,"F09F918D")
+
+p
+
+p<- compute_seasonality(3)
+
+p
+
+p<- compute_seasonality(3,"F09F918D")
+
+p
+
+
+
+```
+
+
+
+
+```{r view distribution, echo=FALSE, message=FALSE }
+
+library(dplyr)
+library(pracma)  # For trapezoidal integration
+
+
+area_under_seasonality <- function(s, t, hourly_values) {
+    stopifnot(is.numeric(s), is.numeric(t), s <= 24 , s >= 0, t <= 24, t >= 0)
+   if(s == t)
+   {
+     return(0)
+   }
+     if(s >= t)
+   {
+     return(area_under_seasonality(0, t, hourly_values)+area_under_seasonality(s,24, hourly_values))
+   }
+  
+
+  # Define helper to get bin index (0-based hour)
+  hour_bins <- 0:23
+  get_bin <- function(x) floor(x)  # e.g., 8.5 → 8
+
+  # Initialize
+  total_area <- 0
+
+  # Current position
+  x <- s
+  while (x < t) {
+    bin <- get_bin(x)
+    next_edge <- min(t, bin + 1)
+    width <- next_edge - x
+    level <- hourly_values[bin + 1]  # +1 for 1-based index
+    total_area <- total_area + level * width
+    x <- next_edge
+  }
+
+  return(total_area)
+}
+
+
+
+# Compute overlaps properly
+# needs seasonality_pattern from seasonality
+
+compute_overlap <- function(lts, ts, posted, cs) {
+  stopifnot(ts-lts < 24, ts >= lts, ts >= posted, lts >= posted)
+  overlap_vec <- numeric(k)  # initialize empty vector of length k
+  
+  for (i in seq_len(k)) {
+    lower <- posted + max(cs[i], lts-posted)
+    upper <- posted + min(cs[i + 1], ts-posted)
+    overlap_vec[i] <- ifelse(lower >= upper,0,   area_under_seasonality(lower %% 24.0,upper %% 24.0 ,seasonality_pattern))
+#                             upper-lower)
+  }
+  return(overlap_vec)
+}
+
+# compute_overlap(0.5,0.7,0.3,cs)
+
+regr_data <- reaction_data  %>%
+  mutate( Y = delta_count) %>%
+  filter( time_ts - time_posted < params$t_limit & emo == "VIEWS")  %>%
+  dplyr::select(Y,time_ts,time_last_ts,time_posted,username,sources,sq)
+
+
+k <- length(cs) - 1
+
+
+
+library(dplyr)
+library(purrr)
+library(broom)
+library(ggplot2)
+
+skipped_users <- list()
+
+fit_user_model <- function(user_data, cs, k) {
+  crit <- unique(user_data$crit)
+
+  # Show number of rows
+  message("Processing: ", crit, " (", nrow(user_data), " rows)")
+
+  tryCatch({
+    # Build design matrix
+    X <- do.call(
+      rbind,
+      lapply(seq_len(nrow(user_data)), function(j) {
+        compute_overlap(
+          user_data$time_last_ts[j],
+          user_data$time_ts[j],
+          user_data$time_posted[j],
+          cs
+        )
+      })
+    )
+
+    X_matrix <- as.matrix(X)
+    rank_X <- qr(X_matrix)$rank
+    ncol_X <- ncol(X_matrix)
+
+    message("  Rank of X: ", rank_X, " / ", ncol_X)
+
+    # Proceed even if X is rank-deficient — let lm() fail naturally
+    X <- as.data.frame(X)
+    colnames(X) <- paste0("alpha_", seq_len(k))
+    model_data <- bind_cols(user_data, X)
+    alpha_vars <- grep("^alpha_", names(model_data), value = TRUE)
+    ypos_zero_alpha <- model_data |>
+      filter(Y > 0) |>
+      filter(if_all(all_of(alpha_vars), ~ .x == 0))
+
+    if (nrow(ypos_zero_alpha) > 0) {
+      message("  Skipping ", crit, ": Y > 0 with all alpha_* == 0 (", nrow(ypos_zero_alpha), " rows)")
+      return(NULL)
+    }
+#    model_data <- read.csv("tmp/simonevoss_md.csv")
+    # Fit OLS and get 
+    model_data <- model_data |>
+      dplyr::select(Y, starts_with("alpha_"))  # Keep Y + regressors only
+
+    write.csv(model_data,paste0("tmp/",crit, "_md.csv"))
+    ols_model <- lm(
+      Y ~ . + 0,
+#     Y ~ alpha_1 + alpha_2 + 0,
+     data = model_data
+    )
+    weights <- 1 / abs(fitted(ols_model))
+    # Fit WLS
+    wls_model <- lm(
+      Y ~ . + 0,
+      data = model_data,
+      weights = weights
+    )
+
+    # Extract coefs
+    coefs_df <- tidy(wls_model, conf.int = TRUE) |>
+      filter(grepl("^alpha_", term))
+
+    cs_labels <- cs[2:(k + 1)]
+    cs_labels_formatted <- format(round(cs_labels, 2), nsmall = 2)
+
+    coefs_df |>
+      mutate(
+        cs_label = factor(cs_labels_formatted, levels = cs_labels_formatted),
+        crit = crit
+      )
+
+  }, error = function(e) {
+    message("  Error for ", crit, ": ", e$message)
+    return(NULL)
+  })
+}
+
+
+dist_group <- function(anal_num) {
+  
+  if(anal_num == 0)  
+  {
+     r_data <- regr_data %>%
+       mutate(crit = "all")
+  }
+  else if(anal_num == 1) {
+     r_data <- regr_data %>%
+       mutate(crit = username)
+  } else if(anal_num == 2) {
+     r_data <- regr_data %>%
+       mutate(crit = sources)
+  } else if(anal_num == 3) {
+     r_data <- regr_data %>%
+       mutate(crit = sq)
+  }
+
+  user_list <- split(r_data, r_data$crit)
+  
+  user_coefs_list <- purrr::map(user_list, fit_user_model, cs = cs, k = k) |>
+  purrr::compact()
+
+  
+    
+  return(user_coefs_list)
+}
+
+plot_res <- function(user_coefs_list)
+{
+  plot_df <- bind_rows(user_coefs_list)
+
+  p<-ggplot(plot_df, aes(x = cs_label, y = estimate)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.8) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                width = 0.2, color = "black") +
+  labs(
+    x = "Interval Upper Bound (cs[2] to cs[k+1])",
+    y = "WLS Coefficient Estimate",
+    title = "WLS Estimates for Interval Coefficients"
+  ) +
+  facet_wrap(~ crit, scales = "free_y", ncol = 5) +
+  theme_minimal(base_size = 8)
+ return(p)
+}
+
+
+all_coefs_list <- dist_group(0)
+plot_res(all_coefs_list)
+
+
+sources_coefs_list <- dist_group(2)
+plot_res(sources_coefs_list)
+
+sq_coefs_list <- dist_group(3)
+plot_res(sq_coefs_list)
+
+
+
+# Step 6: Plot as facet grid
+# ggsave("out/viewtimes.pdf",p, height = 10)
+
+```
+
+
+```{r seasonality_old, echo=FALSE, message=FALSE, eval = FALSE}
+
+
+
 
 
 # --- Piece-wise linear model ---
 seasonal_data <- reaction_data %>% 
    mutate(hour_bin = cut(hour_of_day, breaks = 0:24, right = FALSE, include.lowest = TRUE)) %>%
-  filter(time_ts - time_last_ts < 1)
+  filter(time_ts - time_last_ts < 1 & emo == "EMO")
 
 seasonal_model <- lm(delta_count ~ hour_bin, data = seasonal_data)
 
@@ -174,73 +595,8 @@ ggplot(hour_df, aes(x = factor(hour), y = estimate)) +
 
 ```
 
-```{r view distribution, echo=FALSE, message=FALSE }
 
-library(dplyr)
-library(pracma)  # For trapezoidal integration
-
-area_under_seasonality <- function(s, t, hourly_values) {
-    stopifnot(is.numeric(s), is.numeric(t), s <= 24 , s >= 0, t <= 24, t >= 0)
-   if(s == t)
-   {
-     return(0)
-   }
-     if(s >= t)
-   {
-     return(area_under_seasonality(0, t, hourly_values)+area_under_seasonality(s,24, hourly_values))
-   }
-  
-
-  # Define helper to get bin index (0-based hour)
-  hour_bins <- 0:23
-  get_bin <- function(x) floor(x)  # e.g., 8.5 → 8
-
-  # Initialize
-  total_area <- 0
-
-  # Current position
-  x <- s
-  while (x < t) {
-    bin <- get_bin(x)
-    next_edge <- min(t, bin + 1)
-    width <- next_edge - x
-    level <- hourly_values[bin + 1]  # +1 for 1-based index
-    total_area <- total_area + level * width
-    x <- next_edge
-  }
-
-  return(total_area)
-}
-
-# area_under_seasonality(3,3,hourly_values)
-
-
-# Compute overlaps properly
-compute_overlap <- function(lts, ts, posted, cs) {
-  stopifnot(ts-lts < 24, ts >= lts, ts >= posted, lts >= posted)
-  overlap_vec <- numeric(k)  # initialize empty vector of length k
-  
-  for (i in seq_len(k)) {
-    lower <- posted + max(cs[i], lts-posted)
-    upper <- posted + min(cs[i + 1], ts-posted)
-    overlap_vec[i] <- ifelse(lower >= upper,0,   area_under_seasonality(lower %% 24.0,upper %% 24.0 ,hourly_result$values))
-#                             upper-lower)
-  }
-  overlap_vec
-  return(overlap_vec)
-}
-
-# compute_overlap(0.5,0.7,0.3,cs)
-
-regr_data <- reaction_data  %>%
-  mutate( Y = delta_count) %>%
-  filter( time_ts - time_posted < params$t_limit )  %>%
-  dplyr::select(Y,time_ts,time_last_ts,time_posted)
-
-
-k <- length(cs) - 1
-
-
+```{r distribution_old, echo=FALSE, message=FALSE, eval = FALSE}
 # Apply to each row of regr_data
 X <- do.call(
   rbind,
@@ -248,6 +604,7 @@ X <- do.call(
     compute_overlap(regr_data$time_last_ts[j], regr_data$time_ts[j],regr_data$time_posted[j] , cs)
   })
 )
+
 
 # Check rank of X
 X_matrix <- as.matrix(X)
@@ -268,8 +625,8 @@ X <- as.data.frame(X)
 colnames(X) <- paste0("alpha_", seq_len(k))
 
 # Merge X with Y
-model_data <- bind_cols(regr_data, X)
-
+model_data <- bind_cols(regr_data, X) %>%
+   dplyr::select(Y, starts_with("alpha_")) 
 
 library(purrr)
 
@@ -295,7 +652,7 @@ nonzero_counts <- model_data %>%
 print(nonzero_counts)
 
 
-ols_model <- lm(Y ~ .  - time_ts - time_last_ts - time_posted  + 0, data = model_data)
+ols_model <- lm(Y ~ .   + 0, data = model_data)
 summary(ols_model)
 
 library(broom)
@@ -307,7 +664,7 @@ fitted_vals <- fitted(ols_model)
 
 # Calculate weights using the absolute value
 weights <- 1 / (abs(fitted_vals))
-wls_model <- lm(Y ~ . - time_ts - time_last_ts - time_posted+ 0, data = model_data, weights = weights)
+wls_model <- lm(Y ~ .  + 0, data = model_data, weights = weights)
 summary(wls_model)
 
 # Step 1: Extract WLS model coefficients and CIs
@@ -342,9 +699,4 @@ ggplot(coefs_df, aes(x = cs_label, y = estimate)) +
   ) +
   theme_minimal(base_size = 14)
 
-
-
-
-
 ```
-

@@ -65,9 +65,17 @@ connect_db <- function() {
   )
 }
 
-get_catalogue <- function(con,islandcondition) {
+get_catalogue <- function(con,islandcondition = NULL) {
+  if(is.null(islandcondition))
+  {
+    addeum <- "";
+  }
+  else
+  {
+    addeum <- pasta0(" WHERE (",islandcondition, " )")
+  }
   csqltxt <- paste0("SELECT channel_id	,last_message	,lm_posted	,username	,sources	,account	,subscribers	,catalogue_count	,channel_created	,last_known_message	,file_min_msg	,file_max_msg	,msg_count	,reaction_count	,forwarded_from	,forwarded_to	,lang,	
-                    CONVERT(name USING ASCII) as name FROM channels_info WHERE (",islandcondition, " )")
+                    CONVERT(name USING ASCII) as name FROM channels_info",addeum)
   # Query the database for relevant data
   catalogue_data <- dbGetQuery(con, csqltxt   )
   catalogue_data <- catalogue_data %>%
