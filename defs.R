@@ -83,14 +83,16 @@ get_catalogue <- function(con,islandcondition = NULL) {
   catalogue_data <- catalogue_data %>%
     mutate(
       accepted = forwarded_to / msg_count,
-      sent = forwarded_from / msg_count,
-      reactions_per_msessge = reaction_count / msg_count,
-      reactions_per_user = reaction_count / subscribers,
+# all these commented out values are dependent on sampling
+#      sent = forwarded_from / msg_count,
+#      reactions_per_msessge = reaction_count / msg_count,
+#      reactions_per_user = reaction_count / subscribers,
       reactions_per_msg_user = reaction_count / subscribers / msg_count
     )
   
   return(catalogue_data)
 }
+
 
 get_top_channels <- function(con,catalogue_data, num_channels) {
   

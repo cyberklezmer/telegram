@@ -1,16 +1,16 @@
 ---
-title: "My Report"
+title: "Is Anything Authentic on Telegram? May 22nd, 2005"
 output: html_document
 params:
   rmd_par_island: 'ALL'
   threshold: 20  # ninimal number of reactions to be included in istimation
   num_channels: 20
-  t_limit: 12
+  t_limit: 16
 
 
 ---
 
-```{r setup, echo=FALSE, message=FALSE}
+```{r setup, message=FALSE, echo=FALSE, message=FALSE}
 
 source("defs.R")
 
@@ -22,10 +22,12 @@ library(MASS)
 
 
 # must start at 0:0:0 !!!
-anal_start_str <- "2025-02-22 00:00:00"
+anal_start_str <- "2025-05-18 00:00:00"
+# anal_start_str <- "2025-02-28 00:00:00"
 anal_start <- as.POSIXct(anal_start_str)
 
-anal_end_str <- "2025-03-28 23:59:59"
+anal_end_str <- "2025-05-25 23:59:59"
+#anal_end_str <- "2025-02-28 23:59:59"
 anal_end <- as.POSIXct(anal_end_str)
 
 last_message_str <- anal_end_str
@@ -34,37 +36,43 @@ last_messages<- as.POSIXct(last_message_str)
 # take care, hole in data from 26.3 - 4.4.  !!!
 
 # 0 nzst be first, 
-cs <- c(0,0.0625,0.125,0.25,0.5,1,2,4,8,params$t_limit)
+cs <- c(0,0.0625/2,0.0625,0.125,0.25,0.5,1,2,4,8,params$t_limit)
 
 ```
 
 
-```{r data, echo=FALSE, message=FALSE}
+```{r data, echo=FALSE, message=FALSE, warning=FALSE}
 
 con <- connect_db()
 
-reaction_data <- dbGetQuery(
-  con,
-  sprintf(
-    "SELECT CH.username, RH.message_id, count, RH.TS, posted, IF(RH.reaction_emo = 'VIEWS','VIEWS',HEX(RH.reaction_emo)) AS emo, CH.quartile, IF(CH.sources = 'ST', 'T',CH.sources) as sources
+sqlstring <- sprintf(
+    "SELECT CH.username, RH.message_id, count, RH.TS, posted, IF(RH.reaction_emo = 'VIEWS','VIEWS',HEX(RH.reaction_emo)) AS emo, CH.quartile, IF(CH.sources LIKE '%%T%%' , 'C',CH.sources) as sources
      FROM reactions_history RH
      INNER JOIN messages M 
      ON RH.channel_id = M.channel_id AND RH.message_id = M.msg_id
      INNER JOIN channels_info CH
      ON RH.channel_id = CH.channel_id 
-#     WHERE RH.reaction_emo = 'VIEWS'
-     AND posted > '%s'
+     WHERE posted > '%s'
      AND posted < '%s'
      AND TS <= '%s'
-#     AND RH.message_id = 14220
-    ",
+     AND CH.quartile = 4 
+    " ,
     anal_start_str, last_message_str, anal_end_str
   )
+
+# AND   username = 'crypto_insider_deutscher'
+
+reaction_data <- dbGetQuery(
+  con, sqlstring
 )
 
 # catalogue <- get_catalogue(con)
 
-dbDisconnect(con)
+channel_info <- get_catalogue(con)
+
+
+
+invisible(dbDisconnect(con))
 
 reaction_data <- reaction_data %>%
   mutate( sq = paste0(sources,quartile))
@@ -99,7 +107,11 @@ reaction_data <- reaction_data %>%
 
   )  %>%
   ungroup() %>%
-    dplyr::select(username,sources,quartile,sq,message_id,emo, delta_count, posted,TS,time_posted,time_ts, time_last_ts, hour_of_day)
+    dplyr::select(username,sources,quartile,sq,message_id,emo, count, delta_count, posted,TS,time_posted,time_ts, time_last_ts, hour_of_day)
+
+
+
+
 
 usernames <- reaction_data |>
   distinct(username) |>
@@ -116,8 +128,171 @@ sqs <- reaction_data |>
 
 ```
 
+```{r descstata, echo=FALSE, message=FALSE, warning=FALSE}
 
-```{r seasonality, echo=FALSE, message=FALSE}
+# Summarise reaction_data by channel_id
+reaction_summary <- reaction_data %>%
+  group_by(username) %>%
+  summarise(
+    n_rows = n(),
+    n_messages = n_distinct(message_id),
+    n_views = sum(emo == "VIEWS", na.rm = TRUE),
+    min_time_posted = min(time_posted, na.rm = TRUE),
+    max_time_posted = max(time_posted, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Join the summary back to channel_info (left join to keep all channel_info rows)
+channel_summary <- channel_info %>%
+  left_join(reaction_summary, by = "username")
+
+
+
+day_values <- reaction_data %>%
+  mutate( delta_t = time_ts - time_posted, 
+          emo_type = ifelse(emo == "VIEWS","view","emo")) %>%
+  filter( delta_t >= 23.75 & delta_t <= 24.25)  %>%  
+  dplyr::select( username, emo_type, message_id, count)
+
+
+# Assuming day_values is already created as shown in your code
+ve_summary <- day_values %>%
+  group_by(username, emo_type) %>%
+  summarise(count = sum(count), .groups = "drop") %>%
+  pivot_wider(
+    names_from = emo_type,
+    values_from = count,
+    values_fill = 0  # In case one of the types is missing for some users
+  )
+
+channel_summary <- channel_summary %>%
+  left_join(ve_summary, by = "username")
+
+channel_summary <- channel_summary %>%
+    mutate( views_per_sm = view/subscribers,
+            emos_per_sm = ifelse(emo == 0, NA, emo/subscribers),
+            emos_per_view = ifelse(emo == 0, NA, emo/view))
+
+library(gridExtra) # For arranging plots and tables in a PDF
+
+
+
+
+# Kernel Density Estimation (KDE)
+
+detect_prob_of_outliers <- function(data, variable) {
+  # Check if the variable exists in the data frame
+  if (!variable %in% names(data)) {
+    stop(paste("Variable", variable, "does not exist in the data frame"))
+  }
+  
+  # Check if the variable is numeric
+  if (!is.numeric(data[[variable]])) {
+    stop(paste("Variable", variable, "is not numeric"))
+  }
+  
+  # Perform kernel density estimation
+  density_est <- density(data[[variable]], na.rm = TRUE)
+  density_values <- approx(density_est$x, density_est$y, xout = data[[variable]])$y
+  
+  # Handle any NA density values (e.g., for extreme outliers)
+  density_values[is.na(density_values)] <- min(density_values, na.rm = TRUE)
+  
+  # Assign probabilities (inverse of density for outliers)
+  outlier_prob <- 1 / density_values
+  outlier_prob <- outlier_prob / max(outlier_prob, na.rm = TRUE)  # Normalize to [0, 1]
+  
+  outlier_prob[is.na(data[[variable]])] <- NA
+  
+  # Add the probabilities as a new column in the original data frame
+  data[[paste0(variable, "_outlier_prob")]] <- outlier_prob
+  
+  return(data)
+}
+
+# Apply the function to accepted
+channel_summary <- detect_prob_of_outliers(channel_summary, "accepted")
+
+
+# Apply the function to reactions_per_msg_user
+channel_summary <- detect_prob_of_outliers(channel_summary, "emos_per_sm")
+
+channel_summary <- detect_prob_of_outliers(channel_summary, "views_per_sm")
+
+channel_summary <- detect_prob_of_outliers(channel_summary, "emos_per_view")
+
+result_data <- channel_summary %>%
+    dplyr::select(username,accepted_outlier_prob,emos_per_sm_outlier_prob,views_per_sm_outlier_prob,emos_per_view_outlier_prob)
+write.csv(result_data, paste0(output_folder, islandid, "_outliers_res.csv"))
+
+result_data
+
+# messages_data <- get_messages(con)  
+
+# Load necessary libraries
+
+# Calculate summary statistics and outlier counts
+
+summary_stats <- function(data, variable) {
+  mean_value <- mean(data[[variable]], na.rm = TRUE)
+  variance_value <- var(data[[variable]], na.rm = TRUE)
+  num_outliers <- sum(data[[paste0("outlier_", variable)]], na.rm = TRUE)
+  return(data.frame(Variable = variable, Mean = mean_value, Variance = variance_value, Outliers = num_outliers))
+}
+
+
+# Summarize data for 'accepted' and 'reactions_per_msg_user'
+stats_accepted <- summary_stats(channel_summary, "accepted")
+stats_emos_per_sm <- summary_stats(channel_summary, "emos_per_sm")
+stats_views_per_sm <- summary_stats(channel_summary, "views_per_sm")
+stats_emos_per_view <- summary_stats(channel_summary, "emos_per_view")
+summary_table <- rbind(stats_accepted, stats_emos_per_sm, stats_views_per_sm,
+                       stats_emos_per_view)
+
+
+# Write to PDF
+pdf(paste0(output_folder, islandid, "_distributions_outliers_with_stats.pdf"))
+
+# Display summary table in the PDF
+print(grid.table(summary_table))
+
+ dev.off()
+
+ 
+library(ggplot2)
+
+plot_histogram <- function(data, column, bins = 20, fill = "lightgreen", 
+                           color = "black", alpha = 0.7, title_prefix = "Distribution of") {
+  ggplot(data, aes(x = .data[[column]])) +
+    geom_histogram(
+      bins = bins,
+      fill = fill,
+      color = color,
+      alpha = alpha
+    ) +
+    labs(
+      title = paste(title_prefix, column),
+      x = column,
+      y = "Frequency"
+    ) +
+    theme_minimal()
+}
+ 
+plot_histogram(channel_summary, "accepted")
+plot_histogram(channel_summary, "emos_per_sm")
+plot_histogram(channel_summary, "views_per_sm")
+plot_histogram(channel_summary, "emos_per_view")
+
+
+
+```
+
+
+### Seasonality
+
+Should be authentic.
+
+```{r seasonality, echo=FALSE, message=FALSE, warning=FALSE}
 
 library(dplyr)
 
@@ -149,12 +324,12 @@ compute_seasonality <- function(anal_num, emotic = NULL) {
   if(is.null(emotic)) {
     chart_title <- "Views by hour"
   } else {
-    chart_title <- paste("Emoticon",emotic,"by hour")
+    chart_title <- paste("Emoticon",ifelse(emotic=="F09F918D","Thumb Up", emotic) ,"by hour")
   }
     
   
   if(anal_num == 0) {
-    names <- c("ALL")
+    names <- c("All channels")
   } else if( anal_num == 1) {
     chart_title <- paste(chart_title," by channels")
     names <- usernames
@@ -264,25 +439,26 @@ p
 
 ```
 
+Languages: C - Czech and Slovak, G - German, P - Polish
+
+```{r seasonality_sensitivity, echo=FALSE, message=FALSE, warning=FALSE }
+
+# p<- compute_seasonality(2)
+
+# p
 
 
+# p<- compute_seasonality(2,"F09F918D")
 
-```{r seasonality_sensitivity, echo=FALSE, message=FALSE }
-
-p<- compute_seasonality(0,"F09F918D")
-
-p
-
-p<- compute_seasonality(2)
-
-p
+# p
 
 
-p<- compute_seasonality(2,"F09F918D")
-
-p
 
 p<- compute_seasonality(3)
+
+p
+
+p<- compute_seasonality(0,"F09F918D")
 
 p
 
@@ -294,10 +470,13 @@ p
 
 ```
 
+### Views and Emoticons
+
+Should be authentic.
 
 
 
-```{r view distribution, echo=FALSE, message=FALSE }
+```{r view distribution, echo=FALSE, message=FALSE, warning=FALSE }
 
 library(dplyr)
 library(pracma)  # For trapezoidal integration
@@ -361,6 +540,10 @@ regr_data <- reaction_data  %>%
   filter( time_ts - time_posted < params$t_limit & emo == "VIEWS")  %>%
   dplyr::select(Y,time_ts,time_last_ts,time_posted,username,sources,sq)
 
+emo_regr_data <- reaction_data  %>%
+  mutate( Y = delta_count) %>%
+  filter( time_ts - time_posted < params$t_limit & emo != "VIEWS")  %>%
+  dplyr::select(Y,time_ts,time_last_ts,time_posted,username,sources,sq)
 
 k <- length(cs) - 1
 
@@ -431,18 +614,28 @@ fit_user_model <- function(user_data, cs, k) {
       weights = weights
     )
 
-    # Extract coefs
     coefs_df <- tidy(wls_model, conf.int = TRUE) |>
       filter(grepl("^alpha_", term))
 
     cs_labels <- cs[2:(k + 1)]
     cs_labels_formatted <- format(round(cs_labels, 2), nsmall = 2)
+    
+      interval_lengths <- cs[2:(k + 1)] - cs[1:k]
+      
+      coefs_df <- coefs_df |>
+        mutate(
+          cs_label = factor(cs_labels_formatted, levels = cs_labels_formatted),
+          crit = crit,
+          pre_prob = interval_lengths * estimate,
+          pre_prob_low = interval_lengths * conf.low,
+          pre_prob_high = interval_lengths * conf.high
+        ) |>
+        mutate(
+          prob = pre_prob / sum(pre_prob),
+          prob_low = pre_prob_low / sum(pre_prob),
+          prob_high = pre_prob_high / sum(pre_prob)
+        )
 
-    coefs_df |>
-      mutate(
-        cs_label = factor(cs_labels_formatted, levels = cs_labels_formatted),
-        crit = crit
-      )
 
   }, error = function(e) {
     message("  Error for ", crit, ": ", e$message)
@@ -451,22 +644,26 @@ fit_user_model <- function(user_data, cs, k) {
 }
 
 
-dist_group <- function(anal_num) {
+dist_group <- function(anal_num, data) {
   
   if(anal_num == 0)  
   {
-     r_data <- regr_data %>%
+     r_data <- data %>%
        mutate(crit = "all")
   }
   else if(anal_num == 1) {
-     r_data <- regr_data %>%
+     r_data <- data %>%
        mutate(crit = username)
   } else if(anal_num == 2) {
-     r_data <- regr_data %>%
+     r_data <- data %>%
        mutate(crit = sources)
   } else if(anal_num == 3) {
-     r_data <- regr_data %>%
+     r_data <- data %>%
        mutate(crit = sq)
+  } else if(anal_num == 4) {
+     r_data <- data %>%
+       filter(sources == "P") %>%
+       mutate(crit = username)  
   }
 
   user_list <- split(r_data, r_data$crit)
@@ -474,23 +671,21 @@ dist_group <- function(anal_num) {
   user_coefs_list <- purrr::map(user_list, fit_user_model, cs = cs, k = k) |>
   purrr::compact()
 
-  
-    
   return(user_coefs_list)
 }
 
-plot_res <- function(user_coefs_list)
+plot_res <- function(user_coefs_list, title)
 {
   plot_df <- bind_rows(user_coefs_list)
 
-  p<-ggplot(plot_df, aes(x = cs_label, y = estimate)) +
+  p<-ggplot(plot_df, aes(x = cs_label, y = prob)) +
   geom_bar(stat = "identity", fill = "steelblue", width = 0.8) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+  geom_errorbar(aes(ymin = prob_low, ymax = prob_high),
                 width = 0.2, color = "black") +
   labs(
-    x = "Interval Upper Bound (cs[2] to cs[k+1])",
-    y = "WLS Coefficient Estimate",
-    title = "WLS Estimates for Interval Coefficients"
+    x = "hours",
+    y = "p",
+    title = paste("Distribution of ",title,"time")
   ) +
   facet_wrap(~ crit, scales = "free_y", ncol = 5) +
   theme_minimal(base_size = 8)
@@ -498,16 +693,26 @@ plot_res <- function(user_coefs_list)
 }
 
 
-all_coefs_list <- dist_group(0)
-plot_res(all_coefs_list)
+all_coefs_list <- dist_group(0, regr_data)
+plot_res(all_coefs_list,"view")
 
+all_emo_coefs_list <- dist_group(0, emo_regr_data)
+plot_res(all_emo_coefs_list,"emo")
 
-sources_coefs_list <- dist_group(2)
-plot_res(sources_coefs_list)
+# sources_coefs_list <- dist_group(2)
+# plot_res(sources_coefs_list)
 
-sq_coefs_list <- dist_group(3)
-plot_res(sq_coefs_list)
+s_coefs_list <- dist_group(2, regr_data)
+plot_res(s_coefs_list,"view")
 
+s_emo_coefs_list <- dist_group(2, emo_regr_data)
+plot_res(s_emo_coefs_list,"emo")
+
+pl_coefs_list <- dist_group(4, regr_data)
+plot_res(pl_coefs_list,"view")
+
+pl_emo_coefs_list <- dist_group(4, emo_regr_data)
+plot_res(pl_coefs_list,"emo")
 
 
 # Step 6: Plot as facet grid
@@ -516,187 +721,149 @@ plot_res(sq_coefs_list)
 ```
 
 
-```{r seasonality_old, echo=FALSE, message=FALSE, eval = FALSE}
+```{r emo_vs_view , echo=FALSE, message=FALSE, warning=FALSE}
+
+channels_coefs_list <- dist_group(1,regr_data)
+
+channels_emo_coefs_list <- dist_group(1,emo_regr_data)
 
 
+```
 
+```{r forwards, echo=FALSE, message=FALSE, warning=FALSE}
 
+library(binom)
+library(DBI)
 
-# --- Piece-wise linear model ---
-seasonal_data <- reaction_data %>% 
-   mutate(hour_bin = cut(hour_of_day, breaks = 0:24, right = FALSE, include.lowest = TRUE)) %>%
-  filter(time_ts - time_last_ts < 1 & emo == "EMO")
+# Connect to your MySQL database
+con <- connect_db()
 
-seasonal_model <- lm(delta_count ~ hour_bin, data = seasonal_data)
+# Fetch table data
+data <- dbGetQuery(
+  con,"SELECT forwards.*, channels_info.username FROM forwards INNER JOIN channels_info ON forwards.channel_id = channels_info.channel_id WHERE channels_info.quartile = 4")
 
-# Generate prediction data and intervals
+data <- data |>
+  add_count(username, name = "n") |>
+  filter(n >= 50) |>
+  dplyr::select(-n)
 
-# Extract hourly coefficients from the fitted model (run ONCE)
-# Extract fitted hourly step values and their SEs
-get_hourly_levels <- function(model) {
-  # Define hour bins (0–23, midpoint for safety)
-  hour_seq <- 0:23 + 0.5
-  hour_df <- data.frame(
-    hour_of_day = hour_seq,
-    hour_bin = cut(hour_seq, breaks = 0:24, right = FALSE, include.lowest = TRUE)
-  )
+invisible(dbDisconnect(con))
 
-  # Predict with standard errors
-  pred <- predict(model, newdata = hour_df, se.fit = TRUE)
-
-  # Prepare named vectors
-  values <- setNames(pred$fit, levels(hour_df$hour_bin))
-  ses    <- setNames(pred$se.fit, levels(hour_df$hour_bin))
-
-  list(values = values, se = ses)
-}
-
-
-hourly_result <- get_hourly_levels(seasonal_model)
-
-# Access components
-
-
-norm_c <- 1 /sum(hourly_result$values) * length(hourly_result$values)
-
-hourly_result$values <- hourly_result$values * norm_c
-hourly_result$se <-hourly_result$se * norm_c
-
-
-
-
-hourly_values <- hourly_result$values
-hourly_ses    <- hourly_result$se
-
-# Build data frame for plotting
-hour_df <- data.frame(
-  hour = 0:23,
-  estimate = as.numeric(hourly_values),
-  se = as.numeric(hourly_ses)
-) %>%
+# Compute the time difference in hours
+data <- data |>
+  filter(!is.na(posted), !is.na(src_posted)) |>
   mutate(
-    ci_lower = estimate - 1.96 * se,
-    ci_upper = estimate + 1.96 * se
+    delay_hours = as.numeric(difftime(posted, src_posted, units = "hours"))
+  ) |>
+  filter(!is.na(delay_hours))
+
+# Create histogram bins per channel
+histograms_by_channel <- data |>
+  filter(!is.na(posted), !is.na(src_posted)) |>
+  mutate(delay_hours = as.numeric(difftime(posted, src_posted, units = "hours"))) |>
+  mutate(bin = cut(delay_hours, breaks = cs, include.lowest = TRUE, right = FALSE)) |>
+  filter(!is.na(bin)) |>  # Remove undefined bins (outside cs)
+  group_by(username, bin, .drop = FALSE) |>
+  summarise(count = n(), .groups = "drop") |>
+  group_by(username) |>
+  mutate(
+    total = sum(count),
+    prop = count / total
+  ) |>
+  rowwise() |>
+  mutate(
+    ci = list(binom::binom.confint(count, total, method = "wilson"))
+  ) |>
+  unnest_wider(ci) |>
+  dplyr::select(username, bin, count, prop, lower, upper) |>
+  group_by(username) |>
+  group_split() |>
+  setNames(
+    data |>
+      filter(!is.na(posted), !is.na(src_posted)) |>
+      mutate(delay_hours = as.numeric(difftime(posted, src_posted, units = "hours"))) |>
+      mutate(bin = cut(delay_hours, breaks = cs, include.lowest = TRUE, right = FALSE)) |>
+      filter(!is.na(bin)) |>
+      group_by(username) |>
+      group_keys() |>
+      pull(username)
   )
 
-print(hour_df)
 
-# Bar plot with error bars
-ggplot(hour_df, aes(x = factor(hour), y = estimate)) +
-  geom_bar(stat = "identity", fill = "steelblue") +
-  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.3) +
-  labs(
-    title = "Hourly Seasonality Pattern with 95% CI",
-    x = "Hour of Day",
-    y = "Estimated delta_count"
-  ) +
-  theme_minimal()
 
 
 ```
 
 
-```{r distribution_old, echo=FALSE, message=FALSE, eval = FALSE}
-# Apply to each row of regr_data
-X <- do.call(
-  rbind,
-  lapply(seq_len(nrow(regr_data)), function(j) {
-    compute_overlap(regr_data$time_last_ts[j], regr_data$time_ts[j],regr_data$time_posted[j] , cs)
-  })
-)
+### Forwards
+
+May be inauthentic
+
+Forwards - blue, views - red
+
+```{r combining, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=50}
+
+plot_combined_histogram <- function(username) {
+  # Get actual histogram
+  actual_df <- histograms_by_channel[[username]] |>
+    mutate(
+      bin_label = as.character(bin),
+      source = "Forwards"
+    ) |>
+    rename(prob = prop, prob_low = lower, prob_high = upper)
+
+  # Ensure consistent bin ordering
+  bin_levels <- actual_df$bin_label
+
+  # Parse modeled terms like "alpha_1", "alpha_2", ...
+  modeled_df <- all_coefs_list[["all"]] |>
+    mutate(
+      bin_index = as.integer(gsub("alpha_", "", term)),
+      bin_label = bin_levels[bin_index],
+      source = "Views"
+    ) |>
+    dplyr::select(bin_label, prob, prob_low, prob_high, source)
+
+  # Combine actual and modeled data
+  combined_df <- bind_rows(actual_df, modeled_df) |>
+    mutate(bin_label = factor(bin_label, levels = bin_levels))
+
+  # Plot with dodged bars for actual and modeled values
+  ggplot(combined_df, aes(x = bin_label, y = prob, fill = source)) +
+    geom_col(position = position_dodge(width = 0.9), width = 0.8) +
+    geom_errorbar(
+      aes(ymin = prob_low, ymax = prob_high),
+      position = position_dodge(width = 0.9),
+      width = 0.2
+    ) +
+    labs(
+      title = username,
+      x = "Time delay bin",
+      y = "Probability"
+    ) +
+    scale_fill_manual(values = c("Forwards" = "steelblue", "Views" = "red")) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 10, face = "bold"),
+      axis.text.x = element_text(size = 6, angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 6),
+      axis.title = element_text(size = 8),
+      plot.margin = margin(2, 2, 2, 2),
+      legend.position = "none"  # ❌ Hides the legend
+    )
+  }
 
 
-# Check rank of X
-X_matrix <- as.matrix(X)
-rank_X <- qr(X_matrix)$rank
-ncol_X <- ncol(X_matrix)
-
-# Print status
-cat("Rank of X:", rank_X, " | Number of columns:", ncol_X, "\n")
-
-# Warn if singular
-if (rank_X < ncol_X) {
-  stop("Design matrix X is singular (columns are linearly dependent).")
-}
-
-
-# Check X
-X <- as.data.frame(X)
-colnames(X) <- paste0("alpha_", seq_len(k))
-
-# Merge X with Y
-model_data <- bind_cols(regr_data, X) %>%
-   dplyr::select(Y, starts_with("alpha_")) 
-
-library(purrr)
-
-# Get names of covariates (columns starting with "alpha_")
-alpha_vars <- grep("^alpha_", names(model_data), value = TRUE)
-
-# Check if any row has Y > 0 and all alpha_ variables equal to zero
-n_rows_ypos_zero_alpha <- model_data %>%
-  filter(Y > 0) %>%
-  filter(if_all(all_of(alpha_vars), ~ .x == 0)) %>%
-  nrow()
-
-if(n_rows_ypos_zero_alpha > 0)
-{
-  stop("Number of rows with Y > 0 and all alpha_* == 0:", n_rows_ypos_zero_alpha, "\n")
-}
-
-# Count for each alpha_* variable the number of rows where it is non-zero
-nonzero_counts <- model_data %>%
-  summarise(across(all_of(alpha_vars), ~ sum(. != 0)))
-
-
-print(nonzero_counts)
-
-
-ols_model <- lm(Y ~ .   + 0, data = model_data)
-summary(ols_model)
-
-library(broom)
+# Ensure ggplot2 and grDevices are loaded
 library(ggplot2)
-library(dplyr)
+library(grDevices)
 
-residuals <- resid(ols_model)
-fitted_vals <- fitted(ols_model)
+library(patchwork)
 
-# Calculate weights using the absolute value
-weights <- 1 / (abs(fitted_vals))
-wls_model <- lm(Y ~ .  + 0, data = model_data, weights = weights)
-summary(wls_model)
+# Generate all plots into a list
+plot_list <- lapply(names(histograms_by_channel), plot_combined_histogram)
 
-# Step 1: Extract WLS model coefficients and CIs
-coefs_df <- broom::tidy(wls_model, conf.int = TRUE) %>%
-  filter(grepl("^alpha_", term))
-
-# Step 2: Attach x-axis labels cs[2:(k+1)] as categorical variable
-k <- length(cs) - 1
-cs_labels <- cs[2:(k + 1)]
-
-# Format cs labels (optional: round or pretty format)
-cs_labels_formatted <- format(round(cs_labels, 2), nsmall = 2)
-
-# Add labels to coefficients data
-coefs_df <- coefs_df %>%
-  mutate(
-    cs_label = factor(cs_labels_formatted, levels = cs_labels_formatted)
-  )
-
-# Step 3: Plot equidistant bar chart
-ggplot(coefs_df, aes(x = cs_label, y = estimate)) +
-  geom_bar(stat = "identity", fill = "steelblue", width = 0.8) +
-  geom_errorbar(
-    aes(ymin = conf.low, ymax = conf.high),
-    width = 0.2,
-    color = "black"
-  ) +
-  labs(
-    x = "Interval Upper Bound (cs[2] to cs[k+1])",
-    y = "WLS Coefficient Estimate",
-    title = "WLS Estimates for Interval Coefficients"
-  ) +
-  theme_minimal(base_size = 14)
+# Combine them into a grid with 3 columns
+wrap_plots(plot_list, ncol = 3)
 
 ```

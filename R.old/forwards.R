@@ -1,209 +1,146 @@
-library(DBI)
-library(psych)
-library(factoextra)
-library(gridExtra)
-library(RMySQL)
-library(dplyr)
-library(stringr)
-library(xtable)
-library(knitr)
-library(ggplot2)
-library(tidyr)
-library(stringr)
-library(igraph)
-library(ggraph)
-library(tibble)
-library(systemfonts)
-library(png)
-library(grid)
-library(kableExtra)
-library(knitr)
+# identifies top channles by reach, evaluates distribution of accepting/forwarding and makes a graph of proximity
 
-chnumber <- 15
-
-# Define output folder for CSV and PDF
-output_folder <- "out/"
-
-inisig_hist <- 20
-
-test_treshold <- 2.5
-orange_ratio <- 3
-
-list_threshold <- 5
+# number of channels in graph and stats
 
 
-min_src_size <- 50
+# treshold for displaying of a line in graph
+forward_treshold <- 5
 
-TBD
+source("defs.R")
 
-sources <-  dbGetQuery(con,paste0("SELECT  src_channel_id,  COUNT(*) AS row_count   FROM 
-  messages
-  WHERE 
-  channel_id = ", this_channel_id, " AND src_channel_id IS NOT NULL  
-  GROUP BY 
-  src_channel_id
-  HAVING 
-  row_count > ", min_src_size," ORDER BY  row_count DESC"))
+con <- connect_db()
 
 
+catalogue_data <- get_catalogue(con,islandcondition)
 
 
+messages_data <-  dbGetQuery(con,"SELECT channel_id, src_channel_id FROM messages" )
 
-compute_mode <- function(x) {
-  uniq_x <- unique(x)            # Get unique values
-  uniq_x[which.max(tabulate(match(x, uniq_x)))]  # Find the most frequent value
-}
+top_channels <- get_top_channels(con, catalogue_data, 20)
 
-# Connect to MySQL database
-con <- dbConnect(
-  MySQL(),
-  host = "bethel.utia.cas.cz",
-  user = "jak",
-  password = "jaknajaka",
-  dbname = "telegram_full"
-)
+# Step 1: Filter messages_data for interactions between top_channels
+top_channel_ids <- top_channels$channel_id
 
-# Query the database for relevant data
-# catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
-#             msg_count, reaction_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (source = 'slerka')")
+interaction_data_base <- messages_data %>%
+  filter(channel_id %in% top_channel_ids & src_channel_id %in% top_channel_ids) %>%
+  count(src_channel_id, channel_id) %>%
+  complete(src_channel_id = top_channel_ids, channel_id = top_channel_ids, fill = list(n = 0))
 
+# Replace channel_id in interaction_data with corresponding username
+interaction_data_base <- interaction_data_base %>%
+  left_join(select(top_channels, channel_id, username), 
+            by = c("src_channel_id" = "channel_id")) %>%
+  rename(src_username = username) %>%
+  left_join(select(top_channels, channel_id, username,msg_count), 
+            by = c("channel_id" = "channel_id")) %>%
+  rename(dest_username = username,
+         dest_msg_count = msg_count) %>%
+  select(src_username, dest_username, n, dest_msg_count)  # Keep only relevant columns
 
-catalogue_data <- dbGetQuery(con, "SELECT channel_id, username, CONVERT(name USING ASCII) as name, subscribers, catalogue_count,
-             msg_count, reaction_count, forwarded_from, forwarded_to, lang FROM channels_info WHERE (lang = 'CZECH' or lang = 'SLOVAK')")
+interaction_data <- interaction_data_base %>%
+  select(src_username, dest_username, n)
 
-catalogue_data <- catalogue_data %>%
-  mutate(subscribers = if_else(
-    str_detect(subscribers, "K"),
-    as.numeric(str_replace(subscribers, "K", "")) * 1000,
-    if_else(
-      str_detect(subscribers, "M"),as.numeric(str_replace(subscribers, "M", "")) * 1000000, as.numeric(subscribers))
-  ))
+interaction_data <- interaction_data %>%
+  mutate(n = if_else(n<forward_treshold,0,n))
 
-catalogue_data <- catalogue_data %>%
-  mutate(reach_own = subscribers * msg_count)
+# Step 2: Create the adjacency matrix from the completed interaction data
+interaction_matrix <- interaction_data %>%
+  pivot_wider(names_from = dest_username, values_from = n, values_fill = 0) %>%
+  column_to_rownames(var = "src_username") %>%
+  as.matrix()
 
-top_channels_reach <- catalogue_data %>%
-  arrange(desc(reach_own)) %>%
-  head(chnumber)
-
-top_channels_to <- catalogue_data %>%
-  arrange(desc(forwarded_to)) %>%
-  head(chnumber)
-
-top_channels_from <- catalogue_data %>%
-  arrange(desc(forwarded_from)) %>%
-  head(chnumber)
-
-top_channels <- bind_rows(top_channels_reach, top_channels_to, top_channels_from) %>%
-  distinct()
+# Ensure row names are set and convert to matrix
 
 
-global_catalogue_table <- data.frame()
-
-# Loop through each row in top_channels
-
-  forwards_data <- dbGetQuery(con, "SELECT * from forwards")
-  
-  forwards_data <- forwards_data %>%
-    inner_join(top_channels, by = c("channel_id" = "channel_id")) %>%
-    rename(dst_username = username )  %>%
-    inner_join(top_channels, by = c("src_channel_id" = "channel_id")) %>%
-    rename(src_username = username )  
-  
-  
-  forwards_data <- forwards_data %>%
-    mutate(log_forward_time = log10(as.numeric(difftime(posted, src_posted, units = "secs"))),
-           cat_forward_time = ceiling(log_forward_time*2)/2) %>%
-    select(src_username, dst_username, log_forward_time,cat_forward_time)
-
-  output_csv <- file.path(output_folder, "forward_data.csv")
-  write.csv(forwards_data,output_csv)  
-  
-    
-  summary_table <- forwards_data %>%
-    group_by(src_username, dst_username) %>%            # Group by src_channel_id and channel_id
-    filter(n() >= list_threshold) %>%                               # Keep groups with at least 10 records
-    summarise(
-      mean_forward_time = mean(log_forward_time, na.rm = TRUE), # Mean forward time
-      mode_forward_time = compute_mode(cat_forward_time), # Mean forward time
-      sd_forward_time = sd(log_forward_time, na.rm = TRUE),     # Standard deviation of forward time
-      n_records = n(),    
-      # Number of records
-      ratio_below_t = sum(log_forward_time < test_treshold, na.rm = TRUE) / n(),
-      # Number of records
-      .groups = "drop"                                      # Ungroup after summarising
-    )  %>%                               
- mutate( left_ratio = ratio_below_t / pnorm(test_treshold, mean = mean_forward_time, sd = sd_forward_time, lower.tail = TRUE, log.p = FALSE),
-         bar_color = if_else(n_records < inisig_hist,"grey", 
-                                    if_else(mode_forward_time <= 2, "black",
-                                            if_else(left_ratio > orange_ratio,"red", "darkgreen")))
-         )
-
-    output_csv <- file.path(output_folder, "forward_time_summary.csv")
-  write.csv(summary_table,output_csv)  
+output_file_matrix_csv <- file.path(output_folder, paste0( islandid,"_interaction_matrix", ".csv"))
+write.csv(interaction_matrix, output_file_matrix_csv, row.names = TRUE)
 
 
-  # Filter data for combinations with at least 50 rows
-  filtered_data <- forwards_data %>%
-    group_by(src_username, dst_username) %>%
-    filter(n() >= list_threshold) %>%
-    ungroup()
+# Step 3: Convert the matrix into an igraph object
+interaction_graph <- graph_from_adjacency_matrix(interaction_matrix, mode = "directed", weighted = TRUE)
 
-  
-  output_pdf <- file.path(output_folder, "forward_time_histograms_grid.pdf")
+interaction_graph <- delete_vertices(interaction_graph, which(degree(interaction_graph) == 0))
+
+# Print debugging info
+cat("Number of vertices:", vcount(interaction_graph), "\n")
+cat("Number of edges:", ecount(interaction_graph), "\n")
+
+# Check if there are any edges with weights greater than 0
+print(E(interaction_graph)$weight)
+
+# Step 4: Simplify the plot and adjust width scaling
+plot <- ggraph(interaction_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = weight, edge_width = weight), 
+                 arrow = arrow(length = unit(3, 'mm')), # Define arrow size for visibility
+                 end_cap = circle(3, 'mm')) + # Adjust end cap for clarity
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 6) + # Increase label size to 6
+  theme_void()  # Step 5: Save the plot as PNG
+
+output_path <- file.path(output_folder, paste0(islandid,"_interaction_graph.png"))
+ggsave(output_path, plot = plot, width = 10, height = 8, dpi = 300)
 
 
-  # Add a flag for small datasets if needed
-
-  merged_data <- filtered_data %>%
-    left_join(summary_table %>%
-                select(src_username, dst_username, mode_forward_time, n_records,left_ratio, bar_color),
-              by = c("src_username", "dst_username")) 
-  
-  # Add a flag for small datasets if needed
-  if (nrow(merged_data) == 0) {
-    stop("No combinations with at least 50 rows found.")
-  }
-  
-  
-  # Create a faceted plot with color based on mode_forward_time
-  # Load necessary libraries
-
-  
-  # Define output folder for PDF
-
-    # Add missing '1' for cat_forward_time for each combination
-
-  write.csv(merged_data,paste0(output_folder,"data_for_grid.csv"))
-  
-  output_pdf <- file.path(output_folder, "forward_time_histograms_colored_start1.pdf")
-  
-    
-  # Create a faceted plot with forced x-axis starting from 1 and colored bars
-  p <- ggplot(merged_data, aes(x = cat_forward_time, fill = bar_color)) +
-    geom_histogram(stat = "count", binwidth = 1, color = "white", alpha = 0.7) +
-    scale_fill_manual(values = c("red" = "red", "darkgreen" = "darkgreen", "grey" = "grey", "black" = "black")) +
-    scale_x_continuous(breaks = 0:8, limits = c(0, 8)) +
-    labs(
-      x = "t",
-      y = "freq"
-    ) +
-    theme_minimal() +
-    facet_grid(rows = vars(src_username), cols = vars(dst_username), scales = "free") +
-    theme(
-      strip.text.x = element_text(angle = 45, hjust = 1),
-      strip.text.y = element_text(angle = 0)
-    )
-  # Save the plot to a PDF
-  
-
-  
-  ggsave(output_pdf, plot = p, width = 16, height = 12)
-  
-    
-  
-  
+# relative graph
+# Ensure that the necessary libraries are loaded
 
 
 
+# Step 1: Create interaction_data_rel with the calculated column
+interaction_data_rel <- interaction_data_base %>%
+  mutate(percent_received = n / dest_msg_count) %>%
+  select(src_username, dest_username, percent_received) %>%
+  mutate(percent_received = if_else(percent_received < 0.001, 0, percent_received))
+
+
+
+# Step 2: Transform interaction_data_rel into a matrix
+
+interaction_matrix_rel <- interaction_data_rel %>%
+  pivot_wider(names_from = dest_username, values_from = percent_received, values_fill = list(percent_received = 0)) %>%
+  rename_with(~ str_trunc(., 11, ellipsis = "..."), -src_username) %>%  # Shorten column names (excluding src_username)
+  mutate(src_username = str_trunc(src_username, 11, ellipsis = "...")) %>%  # Shorten row names
+  column_to_rownames(var = "src_username") %>%
+  as.matrix()
+
+# Check the result
+
+# Ensure row names are set and convert to matrix
+
+
+output_file_matrix_rel_csv <- file.path(output_folder, paste0( islandid,"_interaction_matrix_rel", ".csv"))
+write.csv(interaction_matrix_rel, output_file_matrix_rel_csv, row.names = TRUE)
+
+
+# Step 3: Convert the matrix into an igraph object
+interaction_graph_rel <- graph_from_adjacency_matrix(interaction_matrix_rel, mode = "directed", weighted = TRUE)
+
+interaction_graph_rel <- delete_vertices(interaction_graph_rel, which(degree(interaction_graph_rel) == 0))
+
+# Print debugging info
+cat("Number of vertices:", vcount(interaction_graph_rel), "\n")
+cat("Number of edges:", ecount(interaction_graph_rel), "\n")
+
+# Check if there are any edges with weights greater than 0
+print(E(interaction_graph_rel)$weight)
+
+# Step 4: Simplify the plot and adjust width scaling
+plot_rel <- ggraph(interaction_graph_rel, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = weight, edge_width = weight), 
+                 arrow = arrow(length = unit(3, 'mm')), # Define arrow size for visibility
+                 end_cap = circle(3, 'mm')) + # Adjust end cap for clarity
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 8) + # Increase label size to 6
+  theme_void()  # Step 5: Save the plot as PNG
+
+output_path_rel <- file.path(output_folder, paste0(islandid,"_interaction_graph_rel.png"))
+ggsave(output_path_rel, plot = plot_rel, width = 10, height = 8, dpi = 300)
+
+
+
+# Close the database connectionint
 dbDisconnect(con)
+
+
+
+
